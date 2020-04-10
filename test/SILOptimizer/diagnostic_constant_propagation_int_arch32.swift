@@ -1,4 +1,4 @@
-// RUN: %target-swift-frontend -emit-sil -primary-file %s -o /dev/null -verify
+// RUN: %target-swift-frontend -emit-sil -primary-file %s -o /dev/null -verify -enable-ownership-stripping-after-serialization
 //
 // REQUIRES: PTRSIZE=32
 //
@@ -234,8 +234,5 @@ func testArithmeticOverflow_UInt_32bit() {
 }
 
 func testIntToFloatConversion() {
-  // No warnings are emitted for conversion through explicit constructor calls.
-  // Note that the error here is because of an implicit conversion of the input
-  // literal to 'Int', which is 32 bits in arch32.
-  _blackHole(Double(9_007_199_254_740_993)) // expected-error {{integer literal '9007199254740993' overflows when stored into 'Int'}}
+  _blackHole(Double(9_007_199_254_740_993)) // Ok
 }

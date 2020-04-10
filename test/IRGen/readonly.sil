@@ -1,4 +1,4 @@
-// RUN: %target-swift-frontend -assume-parsing-unqualified-ownership-sil -emit-ir %s | %FileCheck %s
+// RUN: %target-swift-frontend -emit-ir %s | %FileCheck %s
 //sil_stage canonical
 
 import Builtin
@@ -63,5 +63,5 @@ bb0(%0 : $*Any):
 
 sil_vtable XXX {
   #XXX.deinit!deallocator: @XXX_dtor
-  #XXX.init!initializer.1: @XXX_ctor
+  #XXX.init!initializer: @XXX_ctor
 }

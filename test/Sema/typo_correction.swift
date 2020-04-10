@@ -1,4 +1,4 @@
-// RUN: %target-typecheck-verify-swift -typo-correction-limit 20
+// RUN: %target-typecheck-verify-swift -typo-correction-limit 23
 // RUN: not %target-swift-frontend -typecheck -disable-typo-correction %s 2>&1 | %FileCheck %s -check-prefix=DISABLED
 // RUN: not %target-swift-frontend -typecheck -typo-correction-limit 0 %s 2>&1 | %FileCheck %s -check-prefix=DISABLED
 // RUN: not %target-swift-frontend -typecheck -DIMPORT_FAIL %s 2>&1 | %FileCheck %s -check-prefix=DISABLED
@@ -27,9 +27,9 @@ func *(x: Whatever, y: Whatever) {}
 // This works even for single-character identifiers.
 func test_very_short() {
   // Note that we don't suggest operators.
-  let x = 0 // expected-note {{'x' declared here}}
+  let x = 0 // expected-note {{did you mean 'x'?}}
   let longer = y
-  // expected-error@-1 {{use of unresolved identifier 'y'; did you mean 'x'?}}
+  // expected-error@-1 {{use of unresolved identifier 'y'}}
 }
 
 // It does not trigger in a variable's own initializer.
@@ -100,7 +100,7 @@ func takesSomeClassArchetype<T : SomeClass>(_ t: T) {
 }
 
 // Typo correction of unqualified lookup from generic context.
-struct Generic<T> {
+struct Generic<T> { // expected-note {{'T' declared as parameter to type 'Generic'}}
   func match1() {}
   // expected-note@-1 {{'match1' declared here}}
 
@@ -110,6 +110,21 @@ struct Generic<T> {
       // expected-error@-1 {{use of unresolved identifier 'match0'; did you mean 'match1'?}}
     }
   }
+}
+
+protocol P { // expected-note {{'P' previously declared here}}
+  // expected-note@-1 2{{did you mean 'P'?}}
+  // expected-note@-2 {{'P' declared here}}
+  typealias a = Generic
+}
+
+protocol P {} // expected-error {{invalid redeclaration of 'P'}}
+// expected-note@-1 2{{did you mean 'P'?}}
+// expected-note@-2 {{'P' declared here}}
+
+func hasTypo() {
+  _ = P.a.a // expected-error {{type 'Generic<T>' has no member 'a'}}
+  // expected-error@-1 {{generic parameter 'T' could not be inferred}}
 }
 
 // Typo correction with AnyObject.
@@ -128,7 +143,7 @@ enum Foo {
   case flashing // expected-note {{'flashing' declared here}}
 }
 
-func foo(_ a: Foo) {
+func foo(_ a: Foo) { // expected-note {{'foo' declared here}}
 }
 
 func bar() {
@@ -154,5 +169,55 @@ class CircularValidationWithTypo {
 
   var abababab = cdcdcdc { // expected-error {{use of unresolved identifier 'cdcdcdc'}}
     didSet { }
+  }
+}
+
+// Crash with invalid extension that has not been bound -- https://bugs.swift.org/browse/SR-8984
+protocol PP {}
+
+func boo() {
+  extension PP { // expected-error {{declaration is only valid at file scope}}
+    func g() {
+      booo() // expected-error {{use of unresolved identifier 'booo'}}
+    }
+  }
+}
+
+// Don't show underscored names as typo corrections unless the typed name also
+// begins with an underscore.
+func test_underscored_no_match() {
+  let _ham = 0
+  _ = ham
+  // expected-error@-1 {{use of unresolved identifier 'ham'}}
+}
+
+func test_underscored_match() {
+  let _eggs = 4 // expected-note {{'_eggs' declared here}}
+  _ = _fggs + 1
+  // expected-error@-1 {{use of unresolved identifier '_fggs'; did you mean '_eggs'?}}
+}
+
+// Don't show values before declaration.
+func testFwdRef() {
+  let _ = forward_refX + 1 // expected-error {{use of unresolved identifier 'forward_refX'}}
+  let forward_ref1 = 4
+}
+
+// Crash with protocol members.
+protocol P1 {
+  associatedtype A1
+  associatedtype A2
+}
+
+protocol P2 {
+  associatedtype A1
+  associatedtype A2
+
+  func method<T: P1>(_: T) where T.A1 == A1, T.A2 == A2
+}
+
+extension P2 {
+  func f() { // expected-note {{did you mean 'f'?}}
+    _ = a // expected-error {{use of unresolved identifier 'a'}}
   }
 }

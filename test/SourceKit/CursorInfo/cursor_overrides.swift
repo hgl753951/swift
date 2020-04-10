@@ -5,11 +5,11 @@ protocol Prot {
 }
 
 class Cls : S1, Prot {
-  func meth() {}
+  override func meth() {}
 }
 
 class SubCls : Cls {
-  func meth() {}
+  override func meth() {}
 }
 
 func goo(x: SubCls) {
@@ -26,8 +26,8 @@ public protocol WithInheritedAssocType : WithAssocType {
 }
 
 // REQUIRES: objc_interop
-// RUN: %sourcekitd-test -req=cursor -pos=16:7 %s -- -embed-bitcode -I %S/Inputs/cursor-overrides %mcp_opt %s | %FileCheck -check-prefix=CHECK1 %s
-// CHECK1: source.lang.swift.ref.function.method.instance (12:8-12:14)
+// RUN: %sourcekitd-test -req=cursor -pos=16:7 %s -- -embed-bitcode -I %S/Inputs/cursor-overrides %s | %FileCheck -check-prefix=CHECK1 %s
+// CHECK1: source.lang.swift.ref.function.method.instance (12:17-12:23)
 // CHECK1: c:@M@cursor_overrides@objc(cs)SubCls(im)meth
 // CHECK1: (SubCls) -> () -> ()
 // CHECK1:      OVERRIDES BEGIN
@@ -38,7 +38,7 @@ public protocol WithInheritedAssocType : WithAssocType {
 // CHECK1-NEXT: c:objc(pl)P1(im)meth
 // CHECK1-NEXT: OVERRIDES END
 
-// RUN: %sourcekitd-test -req=cursor -pos=25:20 %s -- -embed-bitcode -I %S/Inputs/cursor-overrides %mcp_opt %s | %FileCheck -check-prefix=CHECK2 %s
+// RUN: %sourcekitd-test -req=cursor -pos=25:20 %s -- -embed-bitcode -I %S/Inputs/cursor-overrides %s | %FileCheck -check-prefix=CHECK2 %s
 // CHECK2: s:16cursor_overrides22WithInheritedAssocTypeP0eF0
 // CHECK2: OVERRIDES BEGIN
 // CHECK2-NEXT: s:16cursor_overrides13WithAssocTypeP0dE0

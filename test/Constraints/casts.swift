@@ -111,7 +111,7 @@ func protocol_concrete_casts(_ p1: P1, p2: P2, p12: P1 & P2) {
 
   _ = p1 as! P1 & P2
 
-  _ = p2 as! S1
+  _ = p2 as! S1 // expected-warning {{cast from 'P2' to unrelated type 'S1' always fails}}
 
   _ = p12 as! S1
   _ = p12 as! S2
@@ -126,7 +126,7 @@ func protocol_concrete_casts(_ p1: P1, p2: P2, p12: P1 & P2) {
 
   var _:Bool = p1 is P1 & P2
 
-  var _:Bool = p2 is S1
+  var _:Bool = p2 is S1 // expected-warning {{cast from 'P2' to unrelated type 'S1' always fails}}
 
   var _:Bool = p12 is S1
   var _:Bool = p12 is S2
@@ -215,9 +215,26 @@ func rdar29894174(v: B?) {
 // we would fail to produce a diagnostic.
 func process(p: Any?) {
   compare(p is String)
-  // expected-error@-1 {{cannot invoke 'compare' with an argument list of type '(Bool)'}}
-  // expected-note@-2 {{overloads for 'compare' exist with these partially matching parameter lists: (T, T), (T?, T?)}}
+  // expected-error@-1 {{missing argument for parameter #2 in call}} {{22-22=, <#Bool#>}}
 }
 
-func compare<T>(_: T, _: T) {}
+func compare<T>(_: T, _: T) {} // expected-note {{'compare' declared here}}
 func compare<T>(_: T?, _: T?) {}
+
+_ = nil? as? Int?? // expected-error {{'nil' requires a contextual type}}
+
+func test_tuple_casts_no_warn() {
+  struct Foo {}
+
+  let arr: [(Any, Any)] = [(Foo(), Foo())]
+  let tup: (Any, Any) = (Foo(), Foo())
+
+  _ = arr as! [(Foo, Foo)] // Ok
+  _ = tup as! (Foo, Foo) // Ok
+
+  _ = arr as! [(Foo, Foo, Foo)] // expected-warning {{cast from '[(Any, Any)]' to unrelated type '[(Foo, Foo, Foo)]' always fails}}
+  _ = tup as! (Foo, Foo, Foo) // expected-warning {{cast from '(Any, Any)' to unrelated type '(Foo, Foo, Foo)' always fails}}
+
+  _ = arr as! [(a: Foo, Foo)] // expected-warning {{cast from '[(Any, Any)]' to unrelated type '[(a: Foo, Foo)]' always fails}}
+  _ = tup as! (a: Foo, Foo) // expected-warning {{cast from '(Any, Any)' to unrelated type '(a: Foo, Foo)' always fails}}
+}

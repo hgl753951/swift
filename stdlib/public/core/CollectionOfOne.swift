@@ -21,15 +21,15 @@
 ///     let toAdd = 100
 ///     let b = a + CollectionOfOne(toAdd)
 ///     // b == [1, 2, 3, 4, 100]
-@_fixed_layout // FIXME(sil-serialize-all)
+@frozen // trivial-implementation
 public struct CollectionOfOne<Element> {
-  @usableFromInline // FIXME(sil-serialize-all)
+  @usableFromInline // trivial-implementation
   internal var _element: Element
 
   /// Creates an instance containing just the given element.
   ///
   /// - Parameter element: The element to store in the collection.
-  @inlinable // FIXME(sil-serialize-all)
+  @inlinable // trivial-implementation
   public init(_ element: Element) {
     self._element = element
   }
@@ -39,14 +39,14 @@ extension CollectionOfOne {
   /// An iterator that produces one or zero instances of an element.
   ///
   /// `IteratorOverOne` is the iterator for the `CollectionOfOne` type.
-  @_fixed_layout // FIXME(sil-serialize-all)
+  @frozen // trivial-implementation
   public struct Iterator {
-    @usableFromInline // FIXME(sil-serialize-all)
+    @usableFromInline // trivial-implementation
     internal var _elements: Element?
 
     /// Construct an instance that generates `_element!`, or an empty
     /// sequence if `_element == nil`.
-    @inlinable // FIXME(sil-serialize-all)
+    @inlinable // trivial-implementation
     public // @testable
     init(_elements: Element?) {
       self._elements = _elements
@@ -62,7 +62,7 @@ extension CollectionOfOne.Iterator: IteratorProtocol {
   ///
   /// - Returns: The next element in the underlying sequence, if a next element
   ///   exists; otherwise, `nil`.
-  @inlinable // FIXME(sil-serialize-all)
+  @inlinable // trivial-implementation
   public mutating func next() -> Element? {
     let result = _elements
     _elements = nil
@@ -79,7 +79,7 @@ extension CollectionOfOne: RandomAccessCollection, MutableCollection {
   /// The position of the first element.
   ///
   /// In a `CollectionOfOne` instance, `startIndex` is always `0`.
-  @inlinable // FIXME(sil-serialize-all)
+  @inlinable // trivial-implementation
   public var startIndex: Index {
     return 0
   }
@@ -88,7 +88,7 @@ extension CollectionOfOne: RandomAccessCollection, MutableCollection {
   /// last valid subscript argument.
   ///
   /// In a `CollectionOfOne` instance, `endIndex` is always `1`.
-  @inlinable // FIXME(sil-serialize-all)
+  @inlinable // trivial-implementation
   public var endIndex: Index {
     return 1
   }
@@ -97,7 +97,7 @@ extension CollectionOfOne: RandomAccessCollection, MutableCollection {
   ///
   /// - Parameter i: A valid index of the collection. `i` must be `0`.
   /// - Returns: The index value immediately after `i`.
-  @inlinable // FIXME(sil-serialize-all)
+  @inlinable // trivial-implementation
   public func index(after i: Index) -> Index {
     _precondition(i == startIndex)
     return 1
@@ -107,7 +107,7 @@ extension CollectionOfOne: RandomAccessCollection, MutableCollection {
   ///
   /// - Parameter i: A valid index of the collection. `i` must be `1`.
   /// - Returns: The index value immediately before `i`.
-  @inlinable // FIXME(sil-serialize-all)
+  @inlinable // trivial-implementation
   public func index(before i: Index) -> Index {
     _precondition(i == endIndex)
     return 0
@@ -116,8 +116,8 @@ extension CollectionOfOne: RandomAccessCollection, MutableCollection {
   /// Returns an iterator over the elements of this collection.
   ///
   /// - Complexity: O(1)
-  @inlinable // FIXME(sil-serialize-all)
-  public func makeIterator() -> Iterator {
+  @inlinable // trivial-implementation
+  public __consuming func makeIterator() -> Iterator {
     return Iterator(_elements: _element)
   }
 
@@ -125,19 +125,19 @@ extension CollectionOfOne: RandomAccessCollection, MutableCollection {
   ///
   /// - Parameter position: The position of the element to access. The only
   ///   valid position in a `CollectionOfOne` instance is `0`.
-  @inlinable // FIXME(sil-serialize-all)
+  @inlinable // trivial-implementation
   public subscript(position: Int) -> Element {
-    get {
+    _read {
       _precondition(position == 0, "Index out of range")
-      return _element
+      yield _element
     }
-    set {
+    _modify {
       _precondition(position == 0, "Index out of range")
-      _element = newValue
+      yield &_element
     }
   }
 
-  @inlinable // FIXME(sil-serialize-all)
+  @inlinable // trivial-implementation
   public subscript(bounds: Range<Int>) -> SubSequence {
     get {
       _failEarlyRangeCheck(bounds, bounds: 0..<1)
@@ -152,26 +152,21 @@ extension CollectionOfOne: RandomAccessCollection, MutableCollection {
   }
 
   /// The number of elements in the collection, which is always one.
-  @inlinable // FIXME(sil-serialize-all)
+  @inlinable // trivial-implementation
   public var count: Int {
     return 1
   }
 }
 
-extension CollectionOfOne : CustomDebugStringConvertible {
+extension CollectionOfOne: CustomDebugStringConvertible {
   /// A textual representation of the collection, suitable for debugging.
-  @inlinable // FIXME(sil-serialize-all)
   public var debugDescription: String {
     return "CollectionOfOne(\(String(reflecting: _element)))"
   }
 }
 
-extension CollectionOfOne : CustomReflectable {
-  @inlinable // FIXME(sil-serialize-all)
+extension CollectionOfOne: CustomReflectable {
   public var customMirror: Mirror {
     return Mirror(self, children: ["element": _element])
   }
 }
-
-@available(*,deprecated: 4.2,renamed: "CollectionOfOne.Iterator")
-public typealias IteratorOverOne<T> = CollectionOfOne<T>.Iterator

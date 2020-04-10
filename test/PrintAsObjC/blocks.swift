@@ -1,8 +1,8 @@
 // Please keep this file in alphabetical order!
 
 // RUN: %empty-directory(%t)
-// RUN: %target-swift-frontend(mock-sdk: %clang-importer-sdk) -emit-module -o %t %s -disable-objc-attr-requires-foundation-module -swift-version 3
-// RUN: %target-swift-frontend(mock-sdk: %clang-importer-sdk) -parse-as-library %t/blocks.swiftmodule -typecheck -emit-objc-header-path %t/blocks.h -import-objc-header %S/../Inputs/empty.h -disable-objc-attr-requires-foundation-module -swift-version 3
+// RUN: %target-swift-frontend(mock-sdk: %clang-importer-sdk) -emit-module -o %t %s -disable-objc-attr-requires-foundation-module
+// RUN: %target-swift-frontend(mock-sdk: %clang-importer-sdk) -parse-as-library %t/blocks.swiftmodule -typecheck -emit-objc-header-path %t/blocks.h -import-objc-header %S/../Inputs/empty.h -disable-objc-attr-requires-foundation-module
 // RUN: %FileCheck %s < %t/blocks.h
 // RUN: %check-in-clang %t/blocks.h
 
@@ -113,6 +113,9 @@ typealias MyBlockWithNoescapeParam = (() -> ()) -> Int
     return input
   }
 
+  // CHECK-NEXT: - (void)blockWithConsumingArgument:(void (^ _Nonnull)(SWIFT_RELEASES_ARGUMENT NSObject * _Nonnull))block;
+  @objc func blockWithConsumingArgument(_ block: @escaping (__owned NSObject) -> ()) {}
+
   // CHECK-NEXT: @property (nonatomic, copy) NSInteger (^ _Nullable savedBlock)(NSInteger);
   @objc var savedBlock: ((Int) -> Int)?
   
@@ -135,6 +138,9 @@ typealias MyBlockWithNoescapeParam = (() -> ()) -> Int
   
   // CHECK-NEXT: @property (nonatomic, getter=class, setter=setClass:) NSInteger (* _Nonnull class_)(NSInteger);
   @objc var `class`: @convention(c) (_ function: Int) -> Int = { $0 }
+  
+  // CHECK-NEXT: init
+  @objc init() {}
 }
-// CHECK-NEXT: init
+
 // CHECK-NEXT: @end

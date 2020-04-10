@@ -11,6 +11,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "swift/IDE/Refactoring.h"
+#include "swift/IDE/IDERequests.h"
 #include "swift/AST/ASTContext.h"
 #include "swift/AST/ASTPrinter.h"
 #include "swift/AST/Decl.h"
@@ -27,6 +28,7 @@
 #include "swift/Frontend/Frontend.h"
 #include "swift/Index/Index.h"
 #include "swift/Parse/Lexer.h"
+#include "swift/Sema/IDETypeChecking.h"
 #include "swift/Subsystems.h"
 #include "clang/Rewrite/Core/RewriteBuffer.h"
 #include "llvm/ADT/StringSet.h"
@@ -387,7 +389,7 @@ public:
 };
 
 class TextReplacementsRenamer : public Renamer {
-  llvm::StringMap<char> &ReplaceTextContext;
+  llvm::StringSet<> &ReplaceTextContext;
   std::vector<Replacement> Replacements;
 
 public:
@@ -395,7 +397,9 @@ public:
 
 private:
   StringRef registerText(StringRef Text) {
-    return ReplaceTextContext.insert({Text, char()}).first->getKey();
+    if (Text.empty())
+      return Text;
+    return ReplaceTextContext.insert(Text).first->getKey();
   }
 
   StringRef getCallArgLabelReplacement(StringRef OldLabelRange,
@@ -497,7 +501,7 @@ private:
 public:
   TextReplacementsRenamer(const SourceManager &SM, StringRef OldName,
                           StringRef NewName,
-                          llvm::StringMap<char> &ReplaceTextContext)
+                          llvm::StringSet<> &ReplaceTextContext)
       : Renamer(SM, OldName), ReplaceTextContext(ReplaceTextContext),
         New(NewName) {
     assert(Old.isValid() && New.isValid());
@@ -541,7 +545,7 @@ public:
   RenameRangeCollector(const ValueDecl *D, StringRef newName)
       : newName(newName.str()) {
     llvm::raw_string_ostream OS(USR);
-    printDeclUSR(D, OS);
+    printValueDeclUSR(D, OS);
   }
 
   ArrayRef<RenameLoc> results() const { return locations; }
@@ -549,9 +553,7 @@ public:
 private:
   bool indexLocals() override { return true; }
   void failed(StringRef error) override {}
-  bool recordHash(StringRef hash, bool isKnown) override { return true; }
-  bool startDependency(StringRef name, StringRef path, bool isClangModule,
-                       bool isSystem, StringRef hash) override {
+  bool startDependency(StringRef name, StringRef path, bool isClangModule, bool isSystem) override {
     return true;
   }
   bool finishDependency(bool isClangModule) override { return true; }
@@ -688,12 +690,10 @@ public:
                               SourceEditConsumer &EditConsumer,
                               DiagnosticConsumer &DiagConsumer) :
   RefactoringAction(MD, Opts, EditConsumer, DiagConsumer) {
-    // We can only proceed with valid location and source file.
-    if (StartLoc.isValid() && TheFile) {
-      // Resolve the sema token and save it for later use.
-      CursorInfoResolver Resolver(*TheFile);
-      CursorInfo = Resolver.resolve(StartLoc);
-    }
+  // Resolve the sema token and save it for later use.
+  CursorInfo = evaluateOrDefault(TheFile->getASTContext().evaluator,
+                          CursorInfoRequest{ CursorInfoOwner(TheFile, StartLoc)},
+                                 ResolvedCursorInfo());
   }
 };
 
@@ -713,7 +713,6 @@ class RefactoringAction##KIND: public TokenBasedRefactoringAction {           \
 #include "swift/IDE/RefactoringKinds.def"
 
 class RangeBasedRefactoringAction : public RefactoringAction {
-  RangeResolver Resolver;
 protected:
   ResolvedRangeInfo RangeInfo;
 public:
@@ -721,8 +720,9 @@ public:
                               SourceEditConsumer &EditConsumer,
                               DiagnosticConsumer &DiagConsumer) :
   RefactoringAction(MD, Opts, EditConsumer, DiagConsumer),
-  Resolver(*TheFile, Opts.Range.getStart(SM), Opts.Range.getEnd(SM)),
-  RangeInfo(Resolver.resolve()) {}
+  RangeInfo(evaluateOrDefault(MD->getASTContext().evaluator,
+    RangeInfoRequest(RangeInfoOwner(TheFile, Opts.Range.getStart(SM), Opts.Range.getEnd(SM))),
+                              ResolvedRangeInfo())) {}
 };
 
 #define RANGE_REFACTORING(KIND, NAME, ID)                                     \
@@ -780,10 +780,11 @@ bool RefactoringActionLocalRename::performChange() {
                         MD->getNameStr());
     return true;
   }
-  CursorInfoResolver Resolver(*TheFile);
-  ResolvedCursorInfo CursorInfo = Resolver.resolve(StartLoc);
+  CursorInfo = evaluateOrDefault(TheFile->getASTContext().evaluator,
+                          CursorInfoRequest{CursorInfoOwner(TheFile, StartLoc)},
+                                 ResolvedCursorInfo());
   if (CursorInfo.isValid() && CursorInfo.ValueD) {
-    ValueDecl *VD = CursorInfo.ValueD;
+    ValueDecl *VD = CursorInfo.CtorTyRef ? CursorInfo.CtorTyRef : CursorInfo.ValueD;
     llvm::SmallVector<DeclContext *, 8> Scopes;
     analyzeRenameScope(VD, DiagEngine, Scopes);
     if (Scopes.empty())
@@ -913,7 +914,7 @@ ExtractCheckResult checkExtractConditions(ResolvedRangeInfo &RangeInfo,
     Stmt *S = RangeInfo.ContainedNodes[0].get<Stmt *>();
 
     // These aren't independent statement.
-    if (isa<BraceStmt>(S) || isa<CatchStmt>(S) || isa<CaseStmt>(S))
+    if (isa<BraceStmt>(S) || isa<CaseStmt>(S))
       return ExtractCheckResult();
   }
 
@@ -933,6 +934,7 @@ ExtractCheckResult checkExtractConditions(ResolvedRangeInfo &RangeInfo,
   switch (RangeInfo.RangeContext->getContextKind()) {
   case swift::DeclContextKind::Initializer:
   case swift::DeclContextKind::SubscriptDecl:
+  case swift::DeclContextKind::EnumElementDecl:
   case swift::DeclContextKind::AbstractFunctionDecl:
   case swift::DeclContextKind::AbstractClosureExpr:
   case swift::DeclContextKind::TopLevelCodeDecl:
@@ -963,6 +965,7 @@ isApplicable(ResolvedRangeInfo Info, DiagnosticEngine &Diag) {
       success({CannotExtractReason::VoidType});
   }
   }
+  llvm_unreachable("unhandled kind");
 }
 
 static StringRef correctNameInternal(ASTContext &Ctx, StringRef Name,
@@ -1001,7 +1004,7 @@ static StringRef correctNewDeclName(DeclContext *DC, StringRef Name) {
   llvm::SmallVector<ValueDecl*, 16> AllVisibles;
   VectorDeclConsumer Consumer(AllVisibles);
   ASTContext &Ctx = DC->getASTContext();
-  lookupVisibleDecls(Consumer, DC, Ctx.getLazyResolver(), true);
+  lookupVisibleDecls(Consumer, DC, true);
   return correctNameInternal(Ctx, Name, AllVisibles);
 }
 
@@ -1074,7 +1077,7 @@ getNotableRegions(StringRef SourceText, unsigned NameOffset, StringRef Name,
       InputFile("<extract>", true, InputBuffer.get()));
   Invocation.getFrontendOptions().ModuleName = "extract";
 
-  auto Instance = llvm::make_unique<swift::CompilerInstance>();
+  auto Instance = std::make_unique<swift::CompilerInstance>();
   if (Instance->setup(Invocation))
     llvm_unreachable("Failed setup");
 
@@ -1492,6 +1495,7 @@ isApplicable(ResolvedRangeInfo Info, DiagnosticEngine &Diag) {
     case RangeKind::Invalid:
       return false;
   }
+  llvm_unreachable("unhandled kind");
 }
 
 bool RefactoringActionExtractExpr::performChange() {
@@ -1514,6 +1518,7 @@ isApplicable(ResolvedRangeInfo Info, DiagnosticEngine &Diag) {
     case RangeKind::Invalid:
       return false;
   }
+  llvm_unreachable("unhandled kind");
 }
 bool RefactoringActionExtractRepeatedExpr::performChange() {
   return RefactoringActionExtractExprBase(TheFile, RangeInfo,
@@ -1573,6 +1578,7 @@ bool RefactoringActionMoveMembersToExtension::isApplicable(
   case RangeKind::Invalid:
     return false;
   }
+  llvm_unreachable("unhandled kind");
 }
 
 bool RefactoringActionMoveMembersToExtension::performChange() {
@@ -1612,8 +1618,9 @@ class FindAllSubDecls : public SourceEntityWalker {
       return false;
 
     if (auto ASD = dyn_cast<AbstractStorageDecl>(D)) {
-      auto accessors = ASD->getAllAccessorFunctions();
-      Found.insert(accessors.begin(), accessors.end());
+      ASD->visitParsedAccessors([&](AccessorDecl *accessor) {
+        Found.insert(accessor);
+      });
     }
     return true;
   }
@@ -1643,6 +1650,7 @@ bool RefactoringActionReplaceBodiesWithFatalError::isApplicable(
   case RangeKind::Invalid:
     return false;
   }
+  llvm_unreachable("unhandled kind");
 }
 
 bool RefactoringActionReplaceBodiesWithFatalError::performChange() {
@@ -1684,7 +1692,7 @@ findCollapseNestedIfTarget(ResolvedCursorInfo CursorInfo) {
     return {};
 
   IfStmt *InnerIf =
-      dyn_cast_or_null<IfStmt>(Body->getElement(0).dyn_cast<Stmt *>());
+      dyn_cast_or_null<IfStmt>(Body->getFirstElement().dyn_cast<Stmt *>());
   if (!InnerIf)
     return {};
 
@@ -1755,8 +1763,8 @@ findConcatenatedExpressions(ResolvedRangeInfo Info, ASTContext &Ctx) {
   assert(E);
 
   struct StringInterpolationExprFinder: public SourceEntityWalker {
-    std::unique_ptr<llvm::SetVector<Expr*>> Bucket = llvm::
-    make_unique<llvm::SetVector<Expr*>>();
+    std::unique_ptr<llvm::SetVector<Expr *>> Bucket =
+        std::make_unique<llvm::SetVector<Expr *>>();
     ASTContext &Ctx;
 
     bool IsValidInterpolation = true;
@@ -1901,8 +1909,7 @@ public:
   IfExpr *getIf() {
     if (!Assign)
       return nullptr;
-
-    return dyn_cast<IfExpr>(Assign->getSrc());
+    return dyn_cast_or_null<IfExpr>(Assign->getSrc());
   }
 
   SourceRange getNameRange() {
@@ -1988,11 +1995,11 @@ findExpandableTernaryExpression(ResolvedRangeInfo Info) {
 
   if (auto D = Info.ContainedNodes[0].dyn_cast<Decl*>())
     if (auto Binding = dyn_cast<PatternBindingDecl>(D))
-      return llvm::make_unique<ExpandableBindingTernaryExprInfo>(Binding);
+      return std::make_unique<ExpandableBindingTernaryExprInfo>(Binding);
 
   if (auto E = Info.ContainedNodes[0].dyn_cast<Expr*>())
     if (auto Assign = dyn_cast<AssignExpr>(E))
-      return llvm::make_unique<ExpandableAssignTernaryExprInfo>(Assign);
+      return std::make_unique<ExpandableAssignTernaryExprInfo>(Assign);
 
   return nullptr;
 }
@@ -2060,6 +2067,447 @@ bool RefactoringActionExpandTernaryExpr::performChange() {
   EditConsumer.accept(SM, ReplaceRange, DeclBuffer.str());
 
   return false; //don't abort
+}
+
+bool RefactoringActionConvertIfLetExprToGuardExpr::
+  isApplicable(ResolvedRangeInfo Info, DiagnosticEngine &Diag) {
+
+  if (Info.Kind != RangeKind::SingleStatement
+      && Info.Kind != RangeKind::MultiStatement)
+    return false;
+
+  if (Info.ContainedNodes.empty())
+    return false;
+
+  IfStmt *If = nullptr;
+
+  if (Info.ContainedNodes.size() == 1) {
+    if (auto S = Info.ContainedNodes[0].dyn_cast<Stmt*>()) {
+      If = dyn_cast<IfStmt>(S);
+    }
+  }
+
+  if (!If)
+    return false;
+
+  auto CondList = If->getCond();
+
+  if (CondList.size() == 1) {
+    auto E = CondList[0];
+    auto P = E.getKind();
+    if (P == swift::StmtConditionElement::CK_PatternBinding) {
+      auto Body = dyn_cast_or_null<BraceStmt>(If->getThenStmt());
+      if (Body)
+        return true;
+    }
+  }
+
+  return false;
+}
+
+bool RefactoringActionConvertIfLetExprToGuardExpr::performChange() {
+
+  auto S = RangeInfo.ContainedNodes[0].dyn_cast<Stmt*>();
+  IfStmt *If = dyn_cast<IfStmt>(S);
+  auto CondList = If->getCond();
+
+  // Get if-let condition
+  SourceRange range = CondList[0].getSourceRange();
+  SourceManager &SM = RangeInfo.RangeContext->getASTContext().SourceMgr;
+  auto CondCharRange = Lexer::getCharSourceRangeFromSourceRange(SM, range);
+  
+  auto Body = dyn_cast_or_null<BraceStmt>(If->getThenStmt());
+  
+  // Get if-let then body.
+  auto firstElement = Body->getFirstElement();
+  auto lastElement = Body->getLastElement();
+  SourceRange bodyRange = firstElement.getSourceRange();
+  bodyRange.widen(lastElement.getSourceRange());
+  auto BodyCharRange = Lexer::getCharSourceRangeFromSourceRange(SM, bodyRange);
+  
+  llvm::SmallString<64> DeclBuffer;
+  llvm::raw_svector_ostream OS(DeclBuffer);
+  
+  llvm::StringRef Space = " ";
+  llvm::StringRef NewLine = "\n";
+  
+  OS << tok::kw_guard << Space;
+  OS << CondCharRange.str().str() << Space;
+  OS << tok::kw_else << Space;
+  OS << tok::l_brace << NewLine;
+  
+  // Get if-let else body.
+  if (auto *ElseBody = dyn_cast_or_null<BraceStmt>(If->getElseStmt())) {
+    auto firstElseElement = ElseBody->getFirstElement();
+    auto lastElseElement = ElseBody->getLastElement();
+    SourceRange elseBodyRange = firstElseElement.getSourceRange();
+    elseBodyRange.widen(lastElseElement.getSourceRange());
+    auto ElseBodyCharRange = Lexer::getCharSourceRangeFromSourceRange(SM, elseBodyRange);
+    OS << ElseBodyCharRange.str().str() << NewLine;
+  }
+  
+  OS << tok::kw_return << NewLine;
+  OS << tok::r_brace << NewLine;
+  OS << BodyCharRange.str().str();
+  
+  // Replace if-let to guard
+  auto ReplaceRange = RangeInfo.ContentRange;
+  EditConsumer.accept(SM, ReplaceRange, DeclBuffer.str());
+
+  return false;
+}
+
+bool RefactoringActionConvertGuardExprToIfLetExpr::
+  isApplicable(ResolvedRangeInfo Info, DiagnosticEngine &Diag) {
+  if (Info.Kind != RangeKind::SingleStatement
+      && Info.Kind != RangeKind::MultiStatement)
+    return false;
+
+  if (Info.ContainedNodes.empty())
+    return false;
+
+  GuardStmt *guardStmt = nullptr;
+
+  if (Info.ContainedNodes.size() > 0) {
+    if (auto S = Info.ContainedNodes[0].dyn_cast<Stmt*>()) {
+      guardStmt = dyn_cast<GuardStmt>(S);
+    }
+  }
+
+  if (!guardStmt)
+    return false;
+
+  auto CondList = guardStmt->getCond();
+
+  if (CondList.size() == 1) {
+    auto E = CondList[0];
+    auto P = E.getPatternOrNull();
+    if (P && E.getKind() == swift::StmtConditionElement::CK_PatternBinding)
+      return true;
+  }
+
+  return false;
+}
+
+bool RefactoringActionConvertGuardExprToIfLetExpr::performChange() {
+
+  // Get guard stmt
+  auto S = RangeInfo.ContainedNodes[0].dyn_cast<Stmt*>();
+  GuardStmt *Guard = dyn_cast<GuardStmt>(S);
+
+  // Get guard condition
+  auto CondList = Guard->getCond();
+
+  // Get guard condition source
+  SourceRange range = CondList[0].getSourceRange();
+  SourceManager &SM = RangeInfo.RangeContext->getASTContext().SourceMgr;
+  auto CondCharRange = Lexer::getCharSourceRangeFromSourceRange(SM, range);
+  
+  llvm::SmallString<64> DeclBuffer;
+  llvm::raw_svector_ostream OS(DeclBuffer);
+  
+  llvm::StringRef Space = " ";
+  llvm::StringRef NewLine = "\n";
+  
+  OS << tok::kw_if << Space;
+  OS << CondCharRange.str().str() << Space;
+  OS << tok::l_brace << NewLine;
+
+  // Get nodes after guard to place them at if-let body
+  if (RangeInfo.ContainedNodes.size() > 1) {
+    auto S = RangeInfo.ContainedNodes[1].getSourceRange();
+    S.widen(RangeInfo.ContainedNodes.back().getSourceRange());
+    auto BodyCharRange = Lexer::getCharSourceRangeFromSourceRange(SM, S);
+    OS << BodyCharRange.str().str() << NewLine;
+  }
+  OS << tok::r_brace;
+
+  // Get guard body
+  auto Body = dyn_cast_or_null<BraceStmt>(Guard->getBody());
+  
+  if (Body && Body->getNumElements() > 1) {
+    auto firstElement = Body->getFirstElement();
+    auto lastElement = Body->getLastElement();
+    SourceRange bodyRange = firstElement.getSourceRange();
+    bodyRange.widen(lastElement.getSourceRange());
+    auto BodyCharRange = Lexer::getCharSourceRangeFromSourceRange(SM, bodyRange);
+    OS << Space << tok::kw_else << Space << tok::l_brace << NewLine;
+    OS << BodyCharRange.str().str() << NewLine;
+    OS << tok::r_brace;
+  }
+  
+  // Replace guard to if-let
+  auto ReplaceRange = RangeInfo.ContentRange;
+  EditConsumer.accept(SM, ReplaceRange, DeclBuffer.str());
+  
+  return false;
+}
+
+bool RefactoringActionConvertToSwitchStmt::
+isApplicable(ResolvedRangeInfo Info, DiagnosticEngine &Diag) {
+
+  class ConditionalChecker : public ASTWalker {
+  public:
+    bool ParamsUseSameVars = true;
+    bool ConditionUseOnlyAllowedFunctions = false;
+    StringRef ExpectName;
+
+    Expr *walkToExprPost(Expr *E) {
+      if (E->getKind() != ExprKind::DeclRef)
+        return E;
+      auto D = dyn_cast<DeclRefExpr>(E)->getDecl();
+      if (D->getKind() == DeclKind::Var || D->getKind() == DeclKind::Param)
+        ParamsUseSameVars = checkName(dyn_cast<VarDecl>(D));
+      if (D->getKind() == DeclKind::Func)
+        ConditionUseOnlyAllowedFunctions = checkName(dyn_cast<FuncDecl>(D));
+      if (allCheckPassed())
+        return E;
+      return nullptr;
+    }
+
+    bool allCheckPassed() {
+      return ParamsUseSameVars && ConditionUseOnlyAllowedFunctions;
+    }
+
+  private:
+    bool checkName(VarDecl *VD) {
+      auto Name = VD->getName().str();
+      if (ExpectName.empty())
+        ExpectName = Name;
+      return Name == ExpectName;
+    }
+
+    bool checkName(FuncDecl *FD) {
+      const auto Name = FD->getBaseIdentifier().str();
+      return Name == "~="
+      || Name == "=="
+      || Name == "__derived_enum_equals"
+      || Name == "__derived_struct_equals"
+      || Name == "||"
+      || Name == "...";
+    }
+  };
+
+  class SwitchConvertable {
+  public:
+    SwitchConvertable(ResolvedRangeInfo Info) {
+      this->Info = Info;
+    }
+
+    bool isApplicable() {
+      if (Info.Kind != RangeKind::SingleStatement)
+        return false;
+      if (!findIfStmt())
+        return false;
+      return checkEachCondition();
+    }
+
+  private:
+    ResolvedRangeInfo Info;
+    IfStmt *If = nullptr;
+    ConditionalChecker checker;
+
+    bool findIfStmt() {
+      if (Info.ContainedNodes.size() != 1)
+        return false;
+      if (auto S = Info.ContainedNodes.front().dyn_cast<Stmt*>())
+        If = dyn_cast<IfStmt>(S);
+      return If != nullptr;
+    }
+
+    bool checkEachCondition() {
+      checker = ConditionalChecker();
+      do {
+        if (!checkEachElement())
+          return false;
+      } while ((If = dyn_cast_or_null<IfStmt>(If->getElseStmt())));
+      return true;
+    }
+
+    bool checkEachElement() {
+      bool result = true;
+      auto ConditionalList = If->getCond();
+      for (auto Element : ConditionalList) {
+        result &= check(Element);
+      }
+      return result;
+    }
+
+    bool check(StmtConditionElement ConditionElement) {
+      if (ConditionElement.getKind() == StmtConditionElement::CK_Availability)
+        return false;
+      if (ConditionElement.getKind() == StmtConditionElement::CK_PatternBinding)
+        checker.ConditionUseOnlyAllowedFunctions = true;
+      ConditionElement.walk(checker);
+      return checker.allCheckPassed();
+    }
+  };
+  return SwitchConvertable(Info).isApplicable();
+}
+
+bool RefactoringActionConvertToSwitchStmt::performChange() {
+
+  class VarNameFinder : public ASTWalker {
+  public:
+    std::string VarName;
+
+    Expr *walkToExprPost(Expr *E) {
+      if (E->getKind() != ExprKind::DeclRef)
+        return E;
+      auto D = dyn_cast<DeclRefExpr>(E)->getDecl();
+      if (D->getKind() != DeclKind::Var && D->getKind() != DeclKind::Param)
+        return E;
+      VarName = dyn_cast<VarDecl>(D)->getName().str().str();
+      return nullptr;
+    }
+  };
+
+  class ConditionalPatternFinder : public ASTWalker {
+  public:
+    ConditionalPatternFinder(SourceManager &SM) : SM(SM) {}
+
+    SmallString<64> ConditionalPattern = SmallString<64>();
+
+    Expr *walkToExprPost(Expr *E) {
+      if (E->getKind() != ExprKind::Binary)
+        return E;
+      auto BE = dyn_cast<BinaryExpr>(E);
+      if (isFunctionNameAllowed(BE))
+        appendPattern(dyn_cast<BinaryExpr>(E)->getArg());
+      return E;
+    }
+
+    std::pair<bool, Pattern*> walkToPatternPre(Pattern *P) {
+      ConditionalPattern.append(Lexer::getCharSourceRangeFromSourceRange(SM, P->getSourceRange()).str());
+      if (P->getKind() == PatternKind::OptionalSome)
+        ConditionalPattern.append("?");
+      return { true, nullptr };
+    }
+
+  private:
+
+    SourceManager &SM;
+
+    bool isFunctionNameAllowed(BinaryExpr *E) {
+      auto FunctionBody = dyn_cast<DotSyntaxCallExpr>(E->getFn())->getFn();
+      auto FunctionDeclaration = dyn_cast<DeclRefExpr>(FunctionBody)->getDecl();
+      const auto FunctionName = dyn_cast<FuncDecl>(FunctionDeclaration)
+          ->getBaseIdentifier().str();
+      return FunctionName == "~="
+      || FunctionName == "=="
+      || FunctionName == "__derived_enum_equals"
+      || FunctionName == "__derived_struct_equals";
+    }
+
+    void appendPattern(TupleExpr *Tuple) {
+      auto PatternArgument = Tuple->getElements().back();
+      if (PatternArgument->getKind() == ExprKind::DeclRef)
+        PatternArgument = Tuple->getElements().front();
+      if (ConditionalPattern.size() > 0)
+        ConditionalPattern.append(", ");
+      ConditionalPattern.append(Lexer::getCharSourceRangeFromSourceRange(SM, PatternArgument->getSourceRange()).str());
+    }
+  };
+
+  class ConverterToSwitch {
+  public:
+    ConverterToSwitch(ResolvedRangeInfo Info, SourceManager &SM) : SM(SM) {
+      this->Info = Info;
+    }
+
+    void performConvert(SmallString<64> &Out) {
+      If = findIf();
+      OptionalLabel = If->getLabelInfo().Name.str().str();
+      ControlExpression = findControlExpression();
+      findPatternsAndBodies(PatternsAndBodies);
+      DefaultStatements = findDefaultStatements();
+      makeSwitchStatement(Out);
+    }
+
+  private:
+    ResolvedRangeInfo Info;
+    SourceManager &SM;
+
+    IfStmt *If;
+    IfStmt *PreviousIf;
+
+    std::string OptionalLabel;
+    std::string ControlExpression;
+    SmallVector<std::pair<std::string, std::string>, 16> PatternsAndBodies;
+    std::string DefaultStatements;
+
+    IfStmt *findIf() {
+      auto S = Info.ContainedNodes[0].dyn_cast<Stmt*>();
+      return dyn_cast<IfStmt>(S);
+    }
+
+    std::string findControlExpression() {
+      auto ConditionElement = If->getCond().front();
+      auto Finder = VarNameFinder();
+      ConditionElement.walk(Finder);
+      return Finder.VarName;
+    }
+
+    void findPatternsAndBodies(SmallVectorImpl<std::pair<std::string, std::string>> &Out) {
+      do {
+        auto pattern = findPattern();
+        auto body = findBodyStatements();
+        Out.push_back(std::make_pair(pattern, body));
+        PreviousIf = If;
+      } while ((If = dyn_cast_or_null<IfStmt>(If->getElseStmt())));
+    }
+
+    std::string findPattern() {
+      auto ConditionElement = If->getCond().front();
+      auto Finder = ConditionalPatternFinder(SM);
+      ConditionElement.walk(Finder);
+      return Finder.ConditionalPattern.str().str();
+    }
+
+    std::string findBodyStatements() {
+      return findBodyWithoutBraces(If->getThenStmt());
+    }
+
+    std::string findDefaultStatements() {
+      auto ElseBody = dyn_cast_or_null<BraceStmt>(PreviousIf->getElseStmt());
+      if (!ElseBody)
+        return getTokenText(tok::kw_break).str();
+      return findBodyWithoutBraces(ElseBody);
+    }
+
+    std::string findBodyWithoutBraces(Stmt *body) {
+      auto BS = dyn_cast<BraceStmt>(body);
+      if (!BS)
+        return Lexer::getCharSourceRangeFromSourceRange(SM, body->getSourceRange()).str().str();
+      if (BS->getElements().empty())
+        return getTokenText(tok::kw_break).str();
+      SourceRange BodyRange = BS->getElements().front().getSourceRange();
+      BodyRange.widen(BS->getElements().back().getSourceRange());
+      return Lexer::getCharSourceRangeFromSourceRange(SM, BodyRange).str().str();
+    }
+
+    void makeSwitchStatement(SmallString<64> &Out) {
+      StringRef Space = " ";
+      StringRef NewLine = "\n";
+      llvm::raw_svector_ostream OS(Out);
+      if (OptionalLabel.size() > 0)
+        OS << OptionalLabel << ":" << Space;
+      OS << tok::kw_switch << Space << ControlExpression << Space << tok::l_brace << NewLine;
+      for (auto &pair : PatternsAndBodies) {
+        OS << tok::kw_case << Space << pair.first << tok::colon << NewLine;
+        OS << pair.second << NewLine;
+      }
+      OS << tok::kw_default << tok::colon << NewLine;
+      OS << DefaultStatements << NewLine;
+      OS << tok::r_brace;
+    }
+
+  };
+
+  SmallString<64> result;
+  ConverterToSwitch(RangeInfo, SM).performConvert(result);
+  EditConsumer.accept(SM, RangeInfo.ContentRange, result.str());
+  return false;
 }
 
 /// Struct containing info about an IfStmt that can be converted into an IfExpr.
@@ -2334,7 +2782,7 @@ getUnsatisfiedRequirements(const DeclContext *DC) {
   for(ProtocolConformance *Con : DC->getLocalConformances()) {
 
     // Collect non-witnessed requirements.
-    Con->forEachNonWitnessedRequirement(DC->getASTContext().getLazyResolver(),
+    Con->forEachNonWitnessedRequirement(
       [&](ValueDecl *VD) { NonWitnessedReqs.push_back(VD); });
   }
 
@@ -2383,17 +2831,19 @@ collectAvailableRefactoringsAtCursor(SourceFile *SF, unsigned Line,
   DiagnosticEngine DiagEngine(SM);
   std::for_each(DiagConsumers.begin(), DiagConsumers.end(),
                 [&](DiagnosticConsumer *Con) { DiagEngine.addConsumer(*Con); });
-  CursorInfoResolver Resolver(*SF);
   SourceLoc Loc = SM.getLocForLineCol(SF->getBufferID().getValue(), Line, Column);
   if (Loc.isInvalid())
     return {};
-  ResolvedCursorInfo Tok = Resolver.resolve(Lexer::getLocForStartOfToken(SM, Loc));
+  ResolvedCursorInfo Tok = evaluateOrDefault(SF->getASTContext().evaluator,
+    CursorInfoRequest{CursorInfoOwner(SF, Lexer::getLocForStartOfToken(SM, Loc))},
+                                             ResolvedCursorInfo());
   return collectAvailableRefactorings(SF, Tok, Scratch, /*Exclude rename*/false);
 }
 
 static EnumDecl* getEnumDeclFromSwitchStmt(SwitchStmt *SwitchS) {
   if (auto SubjectTy = SwitchS->getSubjectExpr()->getType()) {
-    return SubjectTy->getAnyNominal()->getAsEnumOrEnumExtensionContext();
+    // FIXME: Support more complex subject like '(Enum1, Enum2)'.
+    return dyn_cast_or_null<EnumDecl>(SubjectTy->getAnyNominal());
   }
   return nullptr;
 }
@@ -2570,6 +3020,131 @@ bool RefactoringActionLocalizeString::performChange() {
   return false;
 }
 
+struct MemberwiseParameter {
+  Identifier Name;
+  Type MemberType;
+  Expr *DefaultExpr;
+
+  MemberwiseParameter(Identifier name, Type type, Expr *initialExpr)
+    : Name(name), MemberType(type), DefaultExpr(initialExpr) {}
+};
+
+static void generateMemberwiseInit(SourceEditConsumer &EditConsumer,
+                                   SourceManager &SM,
+                                   ArrayRef<MemberwiseParameter> memberVector,
+                                   SourceLoc targetLocation) {
+  
+  assert(!memberVector.empty());
+
+  EditConsumer.accept(SM, targetLocation, "\ninternal init(");
+  auto insertMember = [&SM](const MemberwiseParameter &memberData,
+                            llvm::raw_ostream &OS, bool wantsSeparator) {
+    OS << memberData.Name << ": " << memberData.MemberType.getString();
+    if (auto *expr = memberData.DefaultExpr) {
+      if (isa<NilLiteralExpr>(expr)) {
+        OS << " = nil";
+      } else if (expr->getSourceRange().isValid()) {
+        auto range =
+          Lexer::getCharSourceRangeFromSourceRange(
+            SM, expr->getSourceRange());
+        OS << " = " << SM.extractText(range);
+      }
+    }
+
+    if (wantsSeparator) {
+      OS << ", ";
+    }
+  };
+
+  // Process the initial list of members, inserting commas as appropriate.
+  std::string Buffer;
+  llvm::raw_string_ostream OS(Buffer);
+  for (const auto &memberData : memberVector.drop_back()) {
+    insertMember(memberData, OS, /*wantsSeparator*/ true);
+  }
+
+  // Process the last (or perhaps, only) member.
+  insertMember(memberVector.back(), OS, /*wantsSeparator*/ false);
+
+  // Synthesize the body.
+  OS << ") {\n";
+  for (auto &member : memberVector) {
+    // self.<property> = <property>
+    OS << "self." << member.Name << " = " << member.Name << "\n";
+  }
+  OS << "}\n";
+
+  // Accept the entire edit.
+  EditConsumer.accept(SM, targetLocation, OS.str());
+}
+
+static SourceLoc
+collectMembersForInit(ResolvedCursorInfo CursorInfo,
+                      SmallVectorImpl<MemberwiseParameter> &memberVector) {
+
+  if (!CursorInfo.ValueD)
+    return SourceLoc();
+  
+  NominalTypeDecl *nominalDecl = dyn_cast<NominalTypeDecl>(CursorInfo.ValueD);
+  if (!nominalDecl || nominalDecl->getStoredProperties().empty() ||
+      CursorInfo.IsRef) {
+    return SourceLoc();
+  }
+
+  SourceLoc bracesStart = nominalDecl->getBraces().Start;
+  if (!bracesStart.isValid())
+    return SourceLoc();
+  
+  SourceLoc targetLocation = bracesStart.getAdvancedLoc(1);
+  if (!targetLocation.isValid())
+    return SourceLoc();
+
+  for (auto varDecl : nominalDecl->getStoredProperties()) {
+    auto patternBinding = varDecl->getParentPatternBinding();
+    if (!patternBinding)
+      continue;
+
+    if (!varDecl->isMemberwiseInitialized(/*preferDeclaredProperties=*/true)) {
+      continue;
+    }
+
+    const auto i = patternBinding->getPatternEntryIndexForVarDecl(varDecl);
+    Expr *defaultInit = nullptr;
+    if (patternBinding->isExplicitlyInitialized(i) ||
+        patternBinding->isDefaultInitializable()) {
+      defaultInit = varDecl->getParentInitializer();
+    }
+
+    memberVector.emplace_back(varDecl->getName(),
+                              varDecl->getType(), defaultInit);
+  }
+  
+  if (memberVector.empty()) {
+    return SourceLoc();
+  }
+  
+  return targetLocation;
+}
+
+bool RefactoringActionMemberwiseInitLocalRefactoring::
+isApplicable(ResolvedCursorInfo Tok, DiagnosticEngine &Diag) {
+  
+  SmallVector<MemberwiseParameter, 8> memberVector;
+  return collectMembersForInit(Tok, memberVector).isValid();
+}
+    
+bool RefactoringActionMemberwiseInitLocalRefactoring::performChange() {
+  
+  SmallVector<MemberwiseParameter, 8> memberVector;
+  SourceLoc targetLocation = collectMembersForInit(CursorInfo, memberVector);
+  if (targetLocation.isInvalid())
+    return true;
+  
+  generateMemberwiseInit(EditConsumer, SM, memberVector, targetLocation);
+  
+  return false;
+}
+
 static CharSourceRange
   findSourceRangeToWrapInCatch(ResolvedCursorInfo CursorInfo,
                                SourceFile *TheFile,
@@ -2631,30 +3206,36 @@ static NumberLiteralExpr *getTrailingNumberLiteral(ResolvedCursorInfo Tok) {
   // This cursor must point to the start of an expression.
   if (Tok.Kind != CursorInfoKind::ExprStart)
     return nullptr;
-  Expr *Parent = Tok.TrailingExpr;
-  assert(Parent);
 
-  // Check if an expression is a number literal.
-  auto IsLiteralNumber = [&](Expr *E) -> NumberLiteralExpr* {
-    if (auto *NL = dyn_cast<NumberLiteralExpr>(E)) {
-
-      // The sub-expression must have the same start loc with the outermost
-      // expression, i.e. the cursor position.
-      if (Parent->getStartLoc().getOpaquePointerValue() ==
-        E->getStartLoc().getOpaquePointerValue()) {
-        return NL;
-      }
-    }
-    return nullptr;
-  };
   // For every sub-expression, try to find the literal expression that matches
   // our criteria.
-  for (auto Pair: Parent->getDepthMap()) {
-    if (auto Result = IsLiteralNumber(Pair.getFirst())) {
-      return Result;
+  class FindLiteralNumber : public ASTWalker {
+    Expr * const parent;
+
+  public:
+    NumberLiteralExpr *found = nullptr;
+
+    explicit FindLiteralNumber(Expr *parent) : parent(parent) { }
+
+    std::pair<bool, Expr *> walkToExprPre(Expr *expr) override {
+      if (auto *literal = dyn_cast<NumberLiteralExpr>(expr)) {
+        // The sub-expression must have the same start loc with the outermost
+        // expression, i.e. the cursor position.
+        if (!found &&
+            parent->getStartLoc().getOpaquePointerValue() ==
+              expr->getStartLoc().getOpaquePointerValue()) {
+          found = literal;
+        }
+      }
+
+      return { found == nullptr, expr };
     }
-  }
-  return nullptr;
+  };
+
+  auto parent = Tok.TrailingExpr;
+  FindLiteralNumber finder(parent);
+  parent->walk(finder);
+  return finder.found;
 }
 
 static std::string insertUnderscore(StringRef Text) {
@@ -2672,8 +3253,11 @@ static std::string insertUnderscore(StringRef Text) {
 
 static void insertUnderscoreInDigits(StringRef Digits,
                                      llvm::raw_ostream &OS) {
-  std::string BeforePoint, AfterPoint;
-  std::tie(BeforePoint, AfterPoint) = Digits.split('.');
+  StringRef BeforePointRef, AfterPointRef;
+  std::tie(BeforePointRef, AfterPointRef) = Digits.split('.');
+
+  std::string BeforePoint(BeforePointRef);
+  std::string AfterPoint(AfterPointRef);
 
   // Insert '_' for the part before the decimal point.
   std::reverse(BeforePoint.begin(), BeforePoint.end());
@@ -2744,8 +3328,6 @@ static CallExpr *findTrailingClosureTarget(SourceManager &SM,
   if (!Args)
     return nullptr;
   Expr *LastArg;
-  if (auto *TSE = dyn_cast<TupleShuffleExpr>(Args))
-    Args = TSE->getSubExpr();
   if (auto *PE = dyn_cast<ParenExpr>(Args)) {
     LastArg = PE->getSubExpr();
   } else {
@@ -2773,33 +3355,24 @@ bool RefactoringActionTrailingClosure::performChange() {
   auto *CE = findTrailingClosureTarget(SM, CursorInfo);
   if (!CE)
     return true;
-  Expr *Args = CE->getArg();
-  if (auto *TSE = dyn_cast<TupleShuffleExpr>(Args))
-    Args = TSE->getSubExpr();
+  Expr *Arg = CE->getArg();
 
   Expr *ClosureArg = nullptr;
   Expr *PrevArg = nullptr;
-  SourceLoc LPLoc, RPLoc;
 
-  if (auto *PE = dyn_cast<ParenExpr>(Args)) {
-    ClosureArg = PE->getSubExpr();
-    LPLoc = PE->getLParenLoc();
-    RPLoc = PE->getRParenLoc();
-  } else {
-    auto *TE = cast<TupleExpr>(Args);
-    auto NumArgs = TE->getNumElements();
-    if (NumArgs == 0)
-      return true;
-    LPLoc = TE->getLParenLoc();
-    RPLoc = TE->getRParenLoc();
-    ClosureArg = TE->getElement(NumArgs - 1);
-    if (NumArgs > 1)
-      PrevArg = TE->getElement(NumArgs - 2);
-  }
+  OriginalArgumentList ArgList = getOriginalArgumentList(Arg);
+
+  auto NumArgs = ArgList.args.size();
+  if (NumArgs == 0)
+    return true;
+  ClosureArg = ArgList.args[NumArgs - 1];
+  if (NumArgs > 1)
+    PrevArg = ArgList.args[NumArgs - 2];
+
   if (auto *ICE = dyn_cast<ImplicitConversionExpr>(ClosureArg))
     ClosureArg = ICE->getSyntacticSubExpr();
 
-  if (LPLoc.isInvalid() || RPLoc.isInvalid())
+  if (ArgList.lParenLoc.isInvalid() || ArgList.rParenLoc.isInvalid())
     return true;
 
   // Replace:
@@ -2813,14 +3386,14 @@ bool RefactoringActionTrailingClosure::performChange() {
     EditConsumer.accept(SM, PreRange, ") ");
   } else {
     CharSourceRange PreRange(
-        SM, LPLoc, ClosureArg->getStartLoc());
+        SM, ArgList.lParenLoc, ClosureArg->getStartLoc());
     EditConsumer.accept(SM, PreRange, " ");
   }
   // Remove original closing paren.
   CharSourceRange PostRange(
       SM,
       Lexer::getLocForEndOfToken(SM, ClosureArg->getEndLoc()),
-      Lexer::getLocForEndOfToken(SM, RPLoc));
+      Lexer::getLocForEndOfToken(SM, ArgList.rParenLoc));
   EditConsumer.remove(SM, PostRange);
   return false;
 }
@@ -2861,6 +3434,98 @@ static bool rangeStartMayNeedRename(ResolvedRangeInfo Info) {
     case RangeKind::Invalid:
       return false;
   }
+  llvm_unreachable("unhandled kind");
+}
+    
+bool RefactoringActionConvertToComputedProperty::
+isApplicable(ResolvedRangeInfo Info, DiagnosticEngine &Diag) {
+  if (Info.Kind != RangeKind::SingleDecl) {
+    return false;
+  }
+  
+  if (Info.ContainedNodes.size() != 1) {
+    return false;
+  }
+  
+  auto D = Info.ContainedNodes[0].dyn_cast<Decl*>();
+  if (!D) {
+    return false;
+  }
+  
+  auto Binding = dyn_cast<PatternBindingDecl>(D);
+  if (!Binding) {
+    return false;
+  }
+
+  auto SV = Binding->getSingleVar();
+  if (!SV) {
+    return false;
+  }
+
+  // willSet, didSet cannot be provided together with a getter
+  for (auto AD : SV->getAllAccessors()) {
+    if (AD->isObservingAccessor()) {
+      return false;
+    }
+  }
+  
+  // 'lazy' must not be used on a computed property
+  // NSCopying and IBOutlet attribute requires property to be mutable
+  auto Attributies = SV->getAttrs();
+  if (Attributies.hasAttribute<LazyAttr>() ||
+      Attributies.hasAttribute<NSCopyingAttr>() ||
+      Attributies.hasAttribute<IBOutletAttr>()) {
+    return false;
+  }
+
+  // Property wrapper cannot be applied to a computed property
+  if (SV->hasAttachedPropertyWrapper()) {
+    return false;
+  }
+
+  // has an initializer
+  return Binding->hasInitStringRepresentation(0);
+}
+
+bool RefactoringActionConvertToComputedProperty::performChange() {
+  // Get an initialization
+  auto D = RangeInfo.ContainedNodes[0].dyn_cast<Decl*>();
+  auto Binding = dyn_cast<PatternBindingDecl>(D);
+  SmallString<128> scratch;
+  auto Init = Binding->getInitStringRepresentation(0, scratch);
+  
+  // Get type
+  auto SV = Binding->getSingleVar();
+  auto SVType = SV->getType();
+  auto TR = SV->getTypeReprOrParentPatternTypeRepr();
+  
+  llvm::SmallString<64> DeclBuffer;
+  llvm::raw_svector_ostream OS(DeclBuffer);
+  llvm::StringRef Space = " ";
+  llvm::StringRef NewLine = "\n";
+  
+  OS << tok::kw_var << Space;
+  // Add var name
+  OS << SV->getNameStr().str() << ":" << Space;
+  // For computed property must write a type of var
+  if (TR) {
+    OS << Lexer::getCharSourceRangeFromSourceRange(SM, TR->getSourceRange()).str();
+  } else {
+    SVType.print(OS);
+  }
+
+  OS << Space << tok::l_brace << NewLine;
+  // Add an initialization
+  OS << tok::kw_return << Space << Init.str() << NewLine;
+  OS << tok::r_brace;
+  
+  // Replace initializer to computed property
+  auto ReplaceStartLoc = Binding->getLoc();
+  auto ReplaceEndLoc = Binding->getSourceRange().End;
+  auto ReplaceRange = SourceRange(ReplaceStartLoc, ReplaceEndLoc);
+  auto ReplaceCharSourceRange = Lexer::getCharSourceRangeFromSourceRange(SM, ReplaceRange);
+  EditConsumer.accept(SM, ReplaceCharSourceRange, DeclBuffer.str());
+  return false; // success
 }
 }// end of anonymous namespace
 
@@ -2872,6 +3537,7 @@ getDescriptiveRefactoringKindName(RefactoringKind Kind) {
 #define REFACTORING(KIND, NAME, ID) case RefactoringKind::KIND: return NAME;
 #include "swift/IDE/RefactoringKinds.def"
     }
+    llvm_unreachable("unhandled kind");
   }
 
   StringRef swift::ide::
@@ -2890,6 +3556,7 @@ getDescriptiveRefactoringKindName(RefactoringKind Kind) {
       case RenameAvailableKind::Unavailable_decl_from_clang:
         return "cannot rename a Clang symbol from its Swift reference";
     }
+    llvm_unreachable("unhandled kind");
   }
 
 SourceLoc swift::ide::RangeConfig::getStart(SourceManager &SM) {
@@ -2925,6 +3592,7 @@ struct swift::ide::FindRenameRangesAnnotatingConsumer::Implementation {
       case RefactoringRangeKind::SelectorArgumentLabel:
         return "sel";
     }
+    llvm_unreachable("unhandled kind");
   }
   void accept(SourceManager &SM, const RenameRangeDetail &Range) {
     std::string NewText;
@@ -2967,8 +3635,6 @@ swift::ide::collectRenameAvailabilityInfo(const ValueDecl *VD,
     AvailKind = RenameAvailableKind::Unavailable_has_no_location;
   } else if (!VD->hasName()) {
     AvailKind = RenameAvailableKind::Unavailable_has_no_name;
-  } else if (!VD->hasAccess()) {
-    return llvm::makeArrayRef(Scratch);
   }
 
   if (isa<AbstractFunctionDecl>(VD)) {
@@ -3062,10 +3728,11 @@ collectAvailableRefactorings(SourceFile *SF, RangeConfig Range,
   DiagnosticEngine DiagEngine(SM);
   std::for_each(DiagConsumers.begin(), DiagConsumers.end(),
     [&](DiagnosticConsumer *Con) { DiagEngine.addConsumer(*Con); });
-
-  RangeResolver Resolver(*SF, Range.getStart(SF->getASTContext().SourceMgr),
-                         Range.getEnd(SF->getASTContext().SourceMgr));
-  ResolvedRangeInfo Result = Resolver.resolve();
+  ResolvedRangeInfo Result = evaluateOrDefault(SF->getASTContext().evaluator,
+    RangeInfoRequest(RangeInfoOwner({SF,
+                      Range.getStart(SF->getASTContext().SourceMgr),
+                      Range.getEnd(SF->getASTContext().SourceMgr)})),
+                                               ResolvedRangeInfo());
 
   bool enableInternalRefactoring = getenv("SWIFT_ENABLE_INTERNAL_REFACTORING_ACTIONS");
 
@@ -3089,7 +3756,7 @@ refactorSwiftModule(ModuleDecl *M, RefactoringOptions Opts,
 
   // Use the default name if not specified.
   if (Opts.PreferredName.empty()) {
-    Opts.PreferredName = getDefaultPreferredName(Opts.Kind);
+    Opts.PreferredName = getDefaultPreferredName(Opts.Kind).str();
   }
 
   switch (Opts.Kind) {
@@ -3109,6 +3776,7 @@ case RefactoringKind::KIND: {                                                  \
     case RefactoringKind::None:
       llvm_unreachable("should not enter here.");
   }
+  llvm_unreachable("unhandled kind");
 }
 
 static std::vector<ResolvedLoc>
@@ -3182,7 +3850,7 @@ int swift::ide::syntacticRename(SourceFile *SF, ArrayRef<RenameLoc> RenameLocs,
     return true; // Already diagnosed.
 
   size_t index = 0;
-  llvm::StringMap<char> ReplaceTextContext;
+  llvm::StringSet<> ReplaceTextContext;
   for(const RenameLoc &Rename: RenameLocs) {
     ResolvedLoc &Resolved = ResolvedLocs[index++];
     TextReplacementsRenamer Renamer(SM, Rename.OldName, Rename.NewName,
@@ -3242,14 +3910,15 @@ int swift::ide::findLocalRenameRanges(
   Diags.addConsumer(DiagConsumer);
 
   auto StartLoc = Lexer::getLocForStartOfToken(SM, Range.getStart(SM));
-
-  CursorInfoResolver Resolver(*SF);
-  ResolvedCursorInfo CursorInfo = Resolver.resolve(StartLoc);
+  ResolvedCursorInfo CursorInfo =
+    evaluateOrDefault(SF->getASTContext().evaluator,
+                      CursorInfoRequest{CursorInfoOwner(SF, StartLoc)},
+                      ResolvedCursorInfo());
   if (!CursorInfo.isValid() || !CursorInfo.ValueD) {
     Diags.diagnose(StartLoc, diag::unresolved_location);
     return true;
   }
-  ValueDecl *VD = CursorInfo.ValueD;
+  ValueDecl *VD = CursorInfo.CtorTyRef ? CursorInfo.CtorTyRef : CursorInfo.ValueD;
   llvm::SmallVector<DeclContext *, 8> Scopes;
   analyzeRenameScope(VD, Diags, Scopes);
   if (Scopes.empty())

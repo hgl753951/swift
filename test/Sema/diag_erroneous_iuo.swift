@@ -64,10 +64,8 @@ func genericFunctionSigilArray<T>(
   // FIXME: We validate these types multiple times resulting in multiple diagnostics
   iuo: [T!] // expected-error {{'!' is not allowed here; perhaps '?' was intended?}}{{10-11=?}}
   // expected-error@-1 {{'!' is not allowed here; perhaps '?' was intended?}}{{10-11=?}}
-  // expected-error@-2 {{'!' is not allowed here; perhaps '?' was intended?}}{{10-11=?}}
 ) -> [T!] { // expected-error {{'!' is not allowed here; perhaps '?' was intended?}}{{8-9=?}}
   // expected-error@-1 {{'!' is not allowed here; perhaps '?' was intended?}}{{8-9=?}}
-  // expected-error@-2 {{'!' is not allowed here; perhaps '?' was intended?}}{{8-9=?}}
   return iuo
 }
 
@@ -221,6 +219,6 @@ struct T {
 }
 
 func select(i: Int!, m: Int, t: T) {
-  let _ = i ? i : m // expected-error {{result values in '? :' expression have mismatching types 'Int?' and 'Int'}}
-  let _ = t.i ? t.j : t.k // expected-error {{result values in '? :' expression have mismatching types 'Int?' and 'Int'}}
+  let _ = i ? i : m // expected-error {{optional type 'Int?' cannot be used as a boolean; test for '!= nil' instead}} {{11-11=(}} {{12-12= != nil)}}
+  let _ = t.i ? t.j : t.k // expected-error {{optional type 'Int?' cannot be used as a boolean; test for '!= nil' instead}} {{11-11=(}} {{14-14= != nil)}}
 }

@@ -193,10 +193,10 @@ void DocStructureArrayBuilder::beginSubStructure(
       BodyLength,
       DocOffset,
       DocLength,
-      DisplayName,
-      TypeName,
-      RuntimeName,
-      SelectorName,
+      DisplayName.str(),
+      TypeName.str(),
+      RuntimeName.str(),
+      SelectorName.str(),
       impl.addInheritedTypes(InheritedTypes),
       impl.addAttrs(Attrs),
       {}, // elements
@@ -579,7 +579,9 @@ VariantFunctions DocStructureArrayFuncs::funcs = {
     nullptr /*AnnotArray_string_get_length*/,
     nullptr /*AnnotArray_string_get_ptr*/,
     nullptr /*AnnotArray_int64_get_value*/,
-    nullptr /*AnnotArray_uid_get_value*/
+    nullptr /*AnnotArray_uid_get_value*/,
+    nullptr /*Annot_data_get_size*/,
+    nullptr /*Annot_data_get_ptr*/,
 };
 
 VariantFunctions *sourcekitd::getVariantFunctionsForDocStructureElementArray() {

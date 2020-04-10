@@ -1,3 +1,4 @@
+// UNSUPPORTED: windows
 // RUN: %empty-directory(%t)
 // RUN: touch %t/a.swift %t/b.swift %t/c.swift
 
@@ -5,17 +6,20 @@
 
 // CHECK-NOT: Handled
 // CHECK: Handled a.swift
-// CHECK-NEXT: Supplementary "./a.swift":
 // CHECK-NEXT: Supplementary swiftdoc: "./a.swiftdoc"
 // CHECK-NEXT: Supplementary swiftmodule: "./a.swiftmodule"
+// CHECK-NEXT: Supplementary swiftsourceinfo: "./a.swiftsourceinfo"
+// CHECK-NEXT: Supplementary "./a.swift":
 // CHECK-NEXT: Handled b.swift
-// CHECK-NEXT: Supplementary "./b.swift":
 // CHECK-NEXT: Supplementary swiftdoc: "./b.swiftdoc"
 // CHECK-NEXT: Supplementary swiftmodule: "./b.swiftmodule"
+// CHECK-NEXT: Supplementary swiftsourceinfo: "./b.swiftsourceinfo"
+// CHECK-NEXT: Supplementary "./b.swift":
 // CHECK-NEXT: Handled c.swift
-// CHECK-NEXT: Supplementary "./c.swift":
 // CHECK-NEXT: Supplementary swiftdoc: "./c.swiftdoc"
 // CHECK-NEXT: Supplementary swiftmodule: "./c.swiftmodule"
+// CHECK-NEXT: Supplementary swiftsourceinfo: "./c.swiftsourceinfo"
+// CHECK-NEXT: Supplementary "./c.swift":
 // CHECK-NEXT: Handled modules
 // CHECK-NOT: Handled
 
@@ -25,8 +29,8 @@
 
 // CHECK-WMO-NOT: Handled
 // CHECK-WMO: Handled all
-// CHECK-WMO: Supplementary "{{.*}}/a.swift":
 // CHECK-WMO: Supplementary object: "main.o"
+// CHECK-WMO: Supplementary "{{.*}}/a.swift":
 // CHECK-WMO-NOT: output
 // CHECK-WMO-NOT: Handled
 
@@ -42,22 +46,22 @@
 
 // CHECK-WMO-THREADED-NOT: Handled
 // CHECK-WMO-THREADED: Handled all
-// CHECK-WMO-THREADED-NEXT: Supplementary "{{.*}}/a.swift":
 // CHECK-WMO-THREADED-NEXT: Supplementary {{object|llvm-bc}}: "{{.*}}/a.{{o|bc}}"
-// CHECK-WMO-THREADED-NEXT: Supplementary "{{.*}}/b.swift":
 // CHECK-WMO-THREADED-NEXT: Supplementary {{object|llvm-bc}}: "{{.*}}/b.{{o|bc}}"
-// CHECK-WMO-THREADED-NEXT: Supplementary "{{.*}}/c.swift":
 // CHECK-WMO-THREADED-NEXT: Supplementary {{object|llvm-bc}}: "{{.*}}/c.{{o|bc}}"
+// CHECK-WMO-THREADED-NEXT: Supplementary "{{.*}}/a.swift":
+// CHECK-WMO-THREADED-NEXT: Supplementary "{{.*}}/b.swift":
+// CHECK-WMO-THREADED-NEXT: Supplementary "{{.*}}/c.swift":
 // CHECK-WMO-THREADED-NEXT: ...with output!
 // CHECK-WMO-THREADED-NOT: Handled
 
 // RUN: mkdir -p %t/tmp-fail/
-// RUN: (cd %t && not env TMPDIR="%t/tmp-fail/" %swiftc_driver_plain -driver-use-frontend-path %S/Inputs/fail.py -c ./a.swift ./b.swift ./c.swift -module-name main -target x86_64-apple-macosx10.9 -driver-filelist-threshold=0 -output-file-map=%S/Inputs/filelists/output.json -force-single-frontend-invocation -num-threads 1)
+// RUN: (cd %t && env TMPDIR="%t/tmp-fail/" not %swiftc_driver_plain -driver-use-frontend-path %S/Inputs/fail.py -c ./a.swift ./b.swift ./c.swift -module-name main -target x86_64-apple-macosx10.9 -driver-filelist-threshold=0 -output-file-map=%S/Inputs/filelists/output.json -force-single-frontend-invocation -num-threads 1)
 // RUN: not ls %t/tmp-fail/sources-*
 // RUN: not ls %t/tmp-fail/outputs-*
 
 // RUN: mkdir -p %t/tmp-crash/
-// RUN: (cd %t && not env TMPDIR="%t/tmp-crash/" %swiftc_driver_plain -driver-use-frontend-path %S/Inputs/crash.py -c ./a.swift ./b.swift ./c.swift -module-name main -target x86_64-apple-macosx10.9 -driver-filelist-threshold=0 -output-file-map=%S/Inputs/filelists/output.json -force-single-frontend-invocation -num-threads 1)
+// RUN: (cd %t && env TMPDIR="%t/tmp-crash/" not %swiftc_driver_plain -driver-use-frontend-path %S/Inputs/crash.py -c ./a.swift ./b.swift ./c.swift -module-name main -target x86_64-apple-macosx10.9 -driver-filelist-threshold=0 -output-file-map=%S/Inputs/filelists/output.json -force-single-frontend-invocation -num-threads 1)
 // RUN: ls %t/tmp-crash/sources-* %t/tmp-crash/outputs-*
 
 

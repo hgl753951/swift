@@ -52,7 +52,7 @@
 /// - `x.isStrictSuperset(of: y)` if and only if
 ///   `x.isSuperset(of: y) && x != y`
 /// - `x.isStrictSubset(of: y)` if and only if `x.isSubset(of: y) && x != y`
-public protocol SetAlgebra : Equatable, ExpressibleByArrayLiteral {  
+public protocol SetAlgebra: Equatable, ExpressibleByArrayLiteral {
   /// A type for which the conforming type provides a containment test.
   associatedtype Element
   
@@ -137,7 +137,7 @@ public protocol SetAlgebra : Equatable, ExpressibleByArrayLiteral {
   /// - Note: if this set and `other` contain elements that are equal but
   ///   distinguishable (e.g. via `===`), which of these elements is present
   ///   in the result is unspecified.
-  __consuming func intersection(_ other: __owned Self) -> Self
+  __consuming func intersection(_ other: Self) -> Self
 
   /// Returns a new set with the elements that are either in this set or in the
   /// given set, but not in both.
@@ -273,7 +273,7 @@ public protocol SetAlgebra : Equatable, ExpressibleByArrayLiteral {
   ///     // Prints "["Bethany", "Eric"]"
   ///
   /// - Parameter other: A set of the same type as the current set.
-  mutating func formIntersection(_ other: __owned Self)
+  mutating func formIntersection(_ other: Self)
 
   /// Removes the elements of the set that are also in the given set and adds
   /// the members of the given set that are not already in the set.
@@ -370,7 +370,7 @@ public protocol SetAlgebra : Equatable, ExpressibleByArrayLiteral {
   ///     // Prints "[6, 0, 1, 3]"
   ///
   /// - Parameter sequence: The elements to use as members of the new set.
-  init<S : Sequence>(_ sequence: __owned S) where S.Element == Element
+  init<S: Sequence>(_ sequence: __owned S) where S.Element == Element
 
   /// Removes the elements of the given set from this set.
   ///
@@ -405,8 +405,8 @@ extension SetAlgebra {
   ///     // Prints "[6, 0, 1, 3]"
   ///
   /// - Parameter sequence: The elements to use as members of the new set.
-  @inlinable // FIXME(sil-serialize-all)
-  public init<S : Sequence>(_ sequence: S)
+  @inlinable // protocol-only
+  public init<S: Sequence>(_ sequence: __owned S)
     where S.Element == Element {
     self.init()
     for e in sequence { insert(e) }
@@ -425,7 +425,7 @@ extension SetAlgebra {
   ///     // Prints "["Diana", "Chris", "Alicia"]"
   ///
   /// - Parameter other: A set of the same type as the current set.
-  @inlinable // FIXME(sil-serialize-all)
+  @inlinable // protocol-only
   public mutating func subtract(_ other: Self) {
     self.formIntersection(self.symmetricDifference(other))
   }
@@ -443,7 +443,7 @@ extension SetAlgebra {
   ///
   /// - Parameter other: A set of the same type as the current set.
   /// - Returns: `true` if the set is a subset of `other`; otherwise, `false`.
-  @inlinable // FIXME(sil-serialize-all)
+  @inlinable // protocol-only
   public func isSubset(of other: Self) -> Bool {
     return self.intersection(other) == self
   }
@@ -462,7 +462,7 @@ extension SetAlgebra {
   /// - Parameter other: A set of the same type as the current set.
   /// - Returns: `true` if the set is a superset of `other`; otherwise,
   ///   `false`.
-  @inlinable // FIXME(sil-serialize-all)
+  @inlinable // protocol-only
   public func isSuperset(of other: Self) -> Bool {
     return other.isSubset(of: self)
   }
@@ -481,7 +481,7 @@ extension SetAlgebra {
   /// - Parameter other: A set of the same type as the current set.
   /// - Returns: `true` if the set has no elements in common with `other`;
   ///   otherwise, `false`.
-  @inlinable // FIXME(sil-serialize-all)
+  @inlinable // protocol-only
   public func isDisjoint(with other: Self) -> Bool {
     return self.intersection(other).isEmpty
   }
@@ -500,13 +500,13 @@ extension SetAlgebra {
   ///
   /// - Parameter other: A set of the same type as the current set.
   /// - Returns: A new set.
-  @inlinable // FIXME(sil-serialize-all)
+  @inlinable // protocol-only
   public func subtracting(_ other: Self) -> Self {
     return self.intersection(self.symmetricDifference(other))
   }
 
   /// A Boolean value that indicates whether the set has no elements.
-  @inlinable // FIXME(sil-serialize-all)
+  @inlinable // protocol-only
   public var isEmpty: Bool {
     return self == Self()
   }
@@ -530,7 +530,7 @@ extension SetAlgebra {
   /// - Parameter other: A set of the same type as the current set.
   /// - Returns: `true` if the set is a strict superset of `other`; otherwise,
   ///   `false`.
-  @inlinable // FIXME(sil-serialize-all)
+  @inlinable // protocol-only
   public func isStrictSuperset(of other: Self) -> Bool {
     return self.isSuperset(of: other) && self != other
   }
@@ -554,7 +554,7 @@ extension SetAlgebra {
   /// - Parameter other: A set of the same type as the current set.
   /// - Returns: `true` if the set is a strict subset of `other`; otherwise,
   ///   `false`.
-  @inlinable // FIXME(sil-serialize-all)
+  @inlinable // protocol-only
   public func isStrictSubset(of other: Self) -> Bool {
     return other.isStrictSuperset(of: self)
   }
@@ -579,7 +579,7 @@ extension SetAlgebra where Element == ArrayLiteralElement {
   ///     // Prints "Whatever it is, it's bound to be delicious!"
   ///
   /// - Parameter arrayLiteral: A list of elements of the new set.
-  @inlinable // FIXME(sil-serialize-all)
+  @inlinable // protocol-only
   public init(arrayLiteral: Element...) {
     self.init(arrayLiteral)
   }  

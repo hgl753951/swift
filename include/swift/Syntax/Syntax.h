@@ -23,6 +23,7 @@
 #ifndef SWIFT_SYNTAX_SYNTAX_H
 #define SWIFT_SYNTAX_SYNTAX_H
 
+#include "swift/Basic/Debug.h"
 #include "swift/Syntax/SyntaxData.h"
 #include "swift/Syntax/References.h"
 #include "swift/Syntax/RawSyntax.h"
@@ -82,7 +83,10 @@ public:
   SyntaxKind getKind() const;
 
   /// Get the shared raw syntax.
-  RC<RawSyntax> getRaw() const;
+  const RC<RawSyntax> &getRaw() const;
+
+  /// Get an ID for this node that is stable across incremental parses
+  SyntaxNodeId getId() const { return getRaw()->getId(); }
 
   /// Get the number of child nodes in this piece of syntax, not including
   /// tokens.
@@ -173,7 +177,7 @@ public:
   void dump(llvm::raw_ostream &OS, unsigned Indent = 0) const;
 
   /// Print a debug representation of the syntax node to standard error.
-  void dump() const;
+  SWIFT_DEBUG_DUMP;
 
   bool hasSameIdentityAs(const Syntax &Other) const {
     return Root == Other.Root && Data == Other.Data;
@@ -197,16 +201,15 @@ public:
     return Data->getAbsolutePosition();
   }
 
-  /// Get the absolute end position (exclusively) of this raw syntax: its offset,
-  /// line, and column.
-  AbsolutePosition getAbsoluteEndPosition() const {
-    return Data->getAbsoluteEndPosition();
+  /// Get the absolute end position (exclusively) where the trailing trivia of
+  /// this node ends.
+  AbsolutePosition getAbsoluteEndPositionAfterTrailingTrivia() const {
+    return Data->getAbsoluteEndPositionAfterTrailingTrivia();
   }
 
-  /// Get the absolute position without skipping the leading trivia of this
-  /// node.
-  AbsolutePosition getAbsolutePositionWithLeadingTrivia() const {
-    return Data->getAbsolutePositionWithLeadingTrivia();
+  /// Get the absolute position at which the leading trivia of this node starts.
+  AbsolutePosition getAbsolutePositionBeforeLeadingTrivia() const {
+    return Data->getAbsolutePositionBeforeLeadingTrivia();
   }
 
   // TODO: hasSameStructureAs ?

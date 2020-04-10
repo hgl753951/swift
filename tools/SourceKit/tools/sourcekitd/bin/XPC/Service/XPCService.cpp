@@ -57,7 +57,7 @@ done:
 }
 
 namespace {
-/// \brief Associates sourcekitd_uid_t to a UIdent.
+/// Associates sourcekitd_uid_t to a UIdent.
 class SKUIDToUIDMap {
   typedef llvm::DenseMap<void *, UIdent> MapTy;
   MapTy Map;
@@ -204,7 +204,7 @@ std::string sourcekitd::getRuntimeLibPath() {
   StringRef Path = MainExePath;
   for (unsigned i = 0; i < MainExeLibNestingLevel; ++i)
     Path = llvm::sys::path::parent_path(Path);
-  return Path;
+  return Path.str();
 }
 
 static void sourcekitdServer_peer_event_handler(xpc_connection_t peer,
@@ -319,7 +319,8 @@ static void fatal_error_handler(void *user_data, const std::string& reason,
   // Write the result out to stderr avoiding errs() because raw_ostreams can
   // call report_fatal_error.
   fprintf(stderr, "SOURCEKITD SERVER FATAL ERROR: %s\n", reason.c_str());
-  ::abort();
+  if (gen_crash_diag)
+    ::abort();
 }
 
 int main(int argc, const char *argv[]) {

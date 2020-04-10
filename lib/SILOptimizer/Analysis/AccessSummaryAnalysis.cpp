@@ -32,7 +32,7 @@ void AccessSummaryAnalysis::processFunction(FunctionInfo *info,
     FunctionSummary &functionSummary = info->getSummary();
     ArgumentSummary &argSummary =
         functionSummary.getAccessForArgument(index);
-    index++;
+    ++index;
 
     auto *functionArg = cast<SILFunctionArgument>(arg);
     // Only summarize @inout_aliasable arguments.
@@ -68,13 +68,15 @@ void AccessSummaryAnalysis::processArgument(FunctionInfo *info,
     switch (user->getKind()) {
     case SILInstructionKind::BeginAccessInst: {
       auto *BAI = cast<BeginAccessInst>(user);
-      const IndexTrieNode *subPath = findSubPathAccessed(BAI);
-      summary.mergeWith(BAI->getAccessKind(), BAI->getLoc(), subPath);
-      // We don't add the users of the begin_access to the worklist because
-      // even if these users eventually begin an access to the address
-      // or a projection from it, that access can't begin more exclusive
-      // access than this access -- otherwise it will be diagnosed
-      // elsewhere.
+      if (BAI->getEnforcement() != SILAccessEnforcement::Unsafe) {
+        const IndexTrieNode *subPath = findSubPathAccessed(BAI);
+        summary.mergeWith(BAI->getAccessKind(), BAI->getLoc(), subPath);
+        // We don't add the users of the begin_access to the worklist because
+        // even if these users eventually begin an access to the address
+        // or a projection from it, that access can't begin more exclusive
+        // access than this access -- otherwise it will be diagnosed
+        // elsewhere.
+      }
       break;
     }
     case SILInstructionKind::EndUnpairedAccessInst:
@@ -134,6 +136,9 @@ static bool hasExpectedUsesOfNoEscapePartialApply(Operand *partialApplyUse) {
   switch (user->getKind()) {
   case SILInstructionKind::ApplyInst:
   case SILInstructionKind::TryApplyInst:
+    return true;
+  // partial_apply [stack] is terminated by a dealloc_stack.
+  case SILInstructionKind::DeallocStackInst:
     return true;
 
   case SILInstructionKind::ConvertFunctionInst:
@@ -225,8 +230,8 @@ void AccessSummaryAnalysis::processPartialApply(FunctionInfo *callerInfo,
 
   // Make sure the partial_apply is not calling the result of another
   // partial_apply.
-  assert(isa<FunctionRefInst>(apply->getCallee()) &&
-         "Noescape partial apply of non-functionref?");
+  assert(isa<FunctionRefBaseInst>(apply->getCallee())
+         && "Noescape partial apply of non-functionref?");
 
   assert(llvm::all_of(apply->getUses(),
                       hasExpectedUsesOfNoEscapePartialApply) &&
@@ -375,13 +380,13 @@ void AccessSummaryAnalysis::recompute(FunctionInfo *initial) {
   } while (needAnotherIteration);
 }
 
-std::string
-AccessSummaryAnalysis::SubAccessSummary::getDescription(SILType BaseType,
-                                                        SILModule &M) const {
+std::string AccessSummaryAnalysis::SubAccessSummary::getDescription(
+    SILType BaseType, SILModule &M, TypeExpansionContext context) const {
   std::string sbuf;
   llvm::raw_string_ostream os(sbuf);
 
-  os << AccessSummaryAnalysis::getSubPathDescription(BaseType, SubPath, M);
+  os << AccessSummaryAnalysis::getSubPathDescription(BaseType, SubPath, M,
+                                                     context);
 
   if (!SubPath->isRoot())
     os << " ";
@@ -404,9 +409,8 @@ void AccessSummaryAnalysis::ArgumentSummary::getSortedSubAccesses(
   assert(storage.size() == SubAccesses.size());
 }
 
-std::string
-AccessSummaryAnalysis::ArgumentSummary::getDescription(SILType BaseType,
-                                                       SILModule &M) const {
+std::string AccessSummaryAnalysis::ArgumentSummary::getDescription(
+    SILType BaseType, SILModule &M, TypeExpansionContext context) const {
   std::string sbuf;
   llvm::raw_string_ostream os(sbuf);
   os << "[";
@@ -420,8 +424,8 @@ AccessSummaryAnalysis::ArgumentSummary::getDescription(SILType BaseType,
     if (index > 0) {
       os << ", ";
     }
-    os << subAccess.getDescription(BaseType, M);
-    index++;
+    os << subAccess.getDescription(BaseType, M, context);
+    ++index;
   }
   os << "]";
 
@@ -464,8 +468,7 @@ AccessSummaryAnalysis::getOrCreateSummary(SILFunction *fn) {
 void AccessSummaryAnalysis::AccessSummaryAnalysis::invalidate() {
   FunctionInfos.clear();
   Allocator.DestroyAll();
-  delete SubPathTrie;
-  SubPathTrie = new IndexTrieNode();
+  SubPathTrie.reset(new IndexTrieNode());
 }
 
 void AccessSummaryAnalysis::invalidate(SILFunction *F, InvalidationKind K) {
@@ -523,7 +526,7 @@ getSingleAddressProjectionUser(SingleValueInstruction *I) {
 
 const IndexTrieNode *
 AccessSummaryAnalysis::findSubPathAccessed(BeginAccessInst *BAI) {
-  IndexTrieNode *SubPath = SubPathTrie;
+  IndexTrieNode *SubPath = getSubPathTrieRoot();
 
   // For each single-user projection of BAI, construct or get a node
   // from the trie representing the index of the field or tuple element
@@ -547,7 +550,8 @@ AccessSummaryAnalysis::findSubPathAccessed(BeginAccessInst *BAI) {
 /// that stored-property relaxation supports: struct stored properties
 /// and tuple elements.
 std::string AccessSummaryAnalysis::getSubPathDescription(
-    SILType baseType, const IndexTrieNode *subPath, SILModule &M) {
+    SILType baseType, const IndexTrieNode *subPath, SILModule &M,
+    TypeExpansionContext context) {
   // Walk the trie to the root to collect the sequence (in reverse order).
   llvm::SmallVector<unsigned, 4> reversedIndices;
   const IndexTrieNode *I = subPath;
@@ -560,15 +564,13 @@ std::string AccessSummaryAnalysis::getSubPathDescription(
   llvm::raw_string_ostream os(sbuf);
 
   SILType containingType = baseType;
-  for (unsigned index : reversed(reversedIndices)) {
+  for (unsigned index : llvm::reverse(reversedIndices)) {
     os << ".";
 
     if (StructDecl *D = containingType.getStructOrBoundGenericStruct()) {
-      auto iter = D->getStoredProperties().begin();
-      std::advance(iter, index);
-      VarDecl *var = *iter;
+      VarDecl *var = D->getStoredProperties()[index];
       os << var->getBaseName();
-      containingType = containingType.getFieldType(var, M);
+      containingType = containingType.getFieldType(var, M, context);
       continue;
     }
 
@@ -593,7 +595,7 @@ static unsigned subPathLength(const IndexTrieNode *subPath) {
 
   const IndexTrieNode *iter = subPath;
   while (iter) {
-    length++;
+    ++length;
     iter = iter->getParent();
   }
 
@@ -627,13 +629,14 @@ void AccessSummaryAnalysis::FunctionSummary::print(raw_ostream &os,
   unsigned argCount = getArgumentCount();
   os << "(";
 
-  for (unsigned i = 0; i < argCount; i++) {
+  for (unsigned i = 0; i < argCount; ++i) {
     if (i > 0) {
       os << ",  ";
     }
     SILArgument *arg = fn->getArgument(i);
     SILModule &m = fn->getModule();
-    os << getAccessForArgument(i).getDescription(arg->getType(), m);
+    os << getAccessForArgument(i).getDescription(arg->getType(), m,
+                                                 TypeExpansionContext(*fn));
   }
 
   os << ")";

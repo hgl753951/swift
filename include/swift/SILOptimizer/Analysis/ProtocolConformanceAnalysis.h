@@ -19,6 +19,7 @@
 #include "swift/SIL/SILArgument.h"
 #include "swift/SIL/SILValue.h"
 #include "swift/SILOptimizer/Analysis/Analysis.h"
+#include "swift/SILOptimizer/Analysis/ClassHierarchyAnalysis.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallSet.h"
 #include "llvm/ADT/SmallVector.h"
@@ -35,16 +36,18 @@ public:
   typedef SmallVector<NominalTypeDecl *, 8> NominalTypeList;
   typedef llvm::DenseMap<ProtocolDecl *, NominalTypeList>
       ProtocolConformanceMap;
+  typedef llvm::DenseMap<ProtocolDecl *, NominalTypeDecl *>
+      SoleConformingTypeMap;
 
   ProtocolConformanceAnalysis(SILModule *Mod)
-      : SILAnalysis(AnalysisKind::ProtocolConformance), M(Mod) {
+      : SILAnalysis(SILAnalysisKind::ProtocolConformance), M(Mod) {
     init();
   }
 
   ~ProtocolConformanceAnalysis();
 
   static bool classof(const SILAnalysis *S) {
-    return S->getKind() == AnalysisKind::ProtocolConformance;
+    return S->getKind() == SILAnalysisKind::ProtocolConformance;
   }
 
   /// Invalidate all information in this analysis.
@@ -54,11 +57,11 @@ public:
   virtual void invalidate(SILFunction *F, InvalidationKind K) override {}
 
   /// Notify the analysis about a newly created function.
-  virtual void notifyAddFunction(SILFunction *F) override {}
+  virtual void notifyAddedOrModifiedFunction(SILFunction *F) override {}
 
   /// Notify the analysis about a function which will be deleted from the
   /// module.
-  virtual void notifyDeleteFunction(SILFunction *F) override {}
+  virtual void notifyWillDeleteFunction(SILFunction *F) override {}
 
   /// Notify the analysis about changed witness or vtables.
   virtual void invalidateFunctionTables() override {}
@@ -71,6 +74,14 @@ public:
                                              ConformsListIt->second.end())
                : ArrayRef<NominalTypeDecl *>();
   }
+  
+  /// Traverse ProtocolConformanceMapCache recursively to determine sole
+  /// conforming concrete type. 
+  NominalTypeDecl *findSoleConformingType(ProtocolDecl *Protocol);
+
+  // Wrapper function to findSoleConformingType that checks for additional
+  // constraints for classes using ClassHierarchyAnalysis.
+  bool getSoleConformingType(ProtocolDecl *Protocol, ClassHierarchyAnalysis *CHA, CanType &ConcreteType);
 
 private:
   /// Compute inheritance properties.
@@ -79,8 +90,11 @@ private:
   /// The module.
   SILModule *M;
 
-  /// A cache that maps a protocol to its conformances
+  /// A cache that maps a protocol to its conformances.
   ProtocolConformanceMap ProtocolConformanceCache;
+
+  /// A cache that holds SoleConformingType for protocols.
+  SoleConformingTypeMap SoleConformingTypeCache;
 };
 
 } // namespace swift

@@ -53,6 +53,15 @@ public func testInitializers() {
   _ = Bar(__: 1)
 }
 
+// CHECK-LABEL: define linkonce_odr hidden {{.+}} @"$sSo3BarC8__noArgsABSgyt_tcfcTO"
+// CHECK: @"\01L_selector(initWithNoArgs)"
+// CHECK-LABEL: define linkonce_odr hidden {{.+}} @"$sSo3BarC8__oneArgABSgs5Int32V_tcfcTO"
+// CHECK: @"\01L_selector(initWithOneArg:)"
+// CHECK-LABEL: define linkonce_odr hidden {{.+}} @"$sSo3BarC9__twoArgs5otherABSgs5Int32V_AGtcfcTO"
+// CHECK: @"\01L_selector(initWithTwoArgs:other:)"
+// CHECK-LABEL: define linkonce_odr hidden {{.+}} @"$sSo3BarC2__ABSgs5Int32V_tcfcTO"
+// CHECK: @"\01L_selector(init:)"
+
 // CHECK-LABEL: define{{( protected)?}} swiftcc void @{{.+}}18testFactoryMethods
 public func testFactoryMethods() {
   // CHECK: @"\01L_selector(fooWithOneArg:)"
@@ -91,19 +100,6 @@ public func testTopLevel() {
 #endif
 }
 
-// CHECK-LABEL: define linkonce_odr hidden swiftcc %swift.metadata_response @"$SSo10PrivFooSubCMa{{.*}} {
-// CHECK: %objc_class** @"\01l_OBJC_CLASS_REF_$_PrivFooSub"
-// CHECK: }
-
-// CHECK-LABEL: define linkonce_odr hidden {{.+}} @"$SSo3BarC8__noArgsABSgyt_tcfcTO"
-// CHECK: @"\01L_selector(initWithNoArgs)"
-// CHECK-LABEL: define linkonce_odr hidden {{.+}} @"$SSo3BarC8__oneArgABSgs5Int32V_tcfcTO"
-// CHECK: @"\01L_selector(initWithOneArg:)"
-// CHECK-LABEL: define linkonce_odr hidden {{.+}} @"$SSo3BarC9__twoArgs5otherABSgs5Int32V_AGtcfcTO"
-// CHECK: @"\01L_selector(initWithTwoArgs:other:)"
-// CHECK-LABEL: define linkonce_odr hidden {{.+}} @"$SSo3BarC2__ABSgs5Int32V_tcfcTO"
-// CHECK: @"\01L_selector(init:)"
-
 _ = __PrivAnonymousA
 _ = __E0PrivA
 _ = __PrivE1A as __PrivE1
@@ -125,7 +121,7 @@ func testCF(_ a: __PrivCFType, b: __PrivCFSub, c: __PrivInt) {
   makeSureAnyObject(a)
   makeSureAnyObject(b)
 #if !IRGEN
-  makeSureAnyObject(c) // expected-error {{argument type '__PrivInt' (aka 'Int32') does not conform to expected type 'AnyObject'}}
+  makeSureAnyObject(c) // expected-error {{argument type '__PrivInt' (aka 'Int32') expected to be an instance of a class or class-constrained type}}
 #endif
 }
 

@@ -1,4 +1,4 @@
-// RUN: %target-typecheck-verify-swift -parse-as-library -swift-version 4
+// RUN: %target-typecheck-verify-swift -parse-as-library
 
 lazy func lazy_func() {} // expected-error {{'lazy' may only be used on 'var' declarations}} {{1-6=}}
 
@@ -10,7 +10,7 @@ struct S {
 
 protocol SomeProtocol {
   lazy var x : Int  // expected-error {{'lazy' isn't allowed on a protocol requirement}} {{3-8=}}
-  // expected-error@-1 {{property in protocol must have explicit { get } or { get set } specifier}}
+  // expected-error@-1 {{property in protocol must have explicit { get } or { get set } specifier}} {{19-19= { get <#set#> \}}}
   // expected-error@-2 {{lazy properties must have an initializer}}
   lazy var y : Int { get } // expected-error {{'lazy' isn't allowed on a protocol requirement}} {{3-8=}}
   // expected-error@-1 {{'lazy' must not be used on a computed property}}
@@ -29,7 +29,7 @@ class TestClass {
 
   lazy var d : Int  // expected-error {{lazy properties must have an initializer}} {{3-8=}}
 
-  lazy var (e, f) = (1,2)  // expected-error {{'lazy' cannot destructure an initializer}} {{3-8=}}
+  lazy var (e, f) = (1,2)  // expected-error 2{{'lazy' cannot destructure an initializer}} {{3-8=}}
 
   lazy var g = { 0 }()   // single-expr closure
 
@@ -86,7 +86,7 @@ class CaptureListInLazyProperty {
 // property type and also as part of the getter
 class WeShouldNotReTypeCheckStatements {
   lazy var firstCase = {
-    _ = nil // expected-error {{'nil' requires a contextual type}}
+    _ = nil // expected-error{{'nil' requires a contextual type}}
     _ = ()
   }
 
@@ -112,7 +112,7 @@ struct Outer {
 
     lazy var y = {_ = 3}()
     // expected-warning@-1 {{variable 'y' inferred to have type '()', which may be unexpected}}
-    // expected-note@-2 {{add an explicit type annotation to silence this warning}}
+    // expected-note@-2 {{add an explicit type annotation to silence this warning}} {{15-15=: ()}}
   }
 }
 

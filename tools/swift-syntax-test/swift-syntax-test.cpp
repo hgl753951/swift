@@ -33,7 +33,9 @@
 #include "swift/Syntax/Serialization/SyntaxSerialization.h"
 #include "swift/Syntax/SyntaxData.h"
 #include "swift/Syntax/SyntaxNodes.h"
+#include "llvm/Support/BinaryByteStream.h"
 #include "llvm/Support/CommandLine.h"
+#include "llvm/Support/FileOutputBuffer.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/Regex.h"
 #include "llvm/Support/raw_ostream.h"
@@ -143,9 +145,39 @@ IncrementalReuseLog("incremental-reuse-log",
                                    "describes all the nodes reused during "
                                    "incremental parsing."));
 
+static llvm::cl::opt<bool>
+OmitNodeIds("omit-node-ids",
+            llvm::cl::desc("If specified, the serialized syntax tree will not "
+                           "include the IDs of the serialized nodes."));
+
+static llvm::cl::opt<bool>
+SerializeAsByteTree("serialize-byte-tree",
+                    llvm::cl::desc("If specified the syntax tree will be "
+                                   "serialized in the ByteTree format instead "
+                                   "of JSON."));
+
+static llvm::cl::opt<bool>
+AddByteTreeFields("add-bytetree-fields",
+                  llvm::cl::desc("If specified, further fields will be added "
+                                 "to the syntax tree if it is serialized as a "
+                                 "ByteTree. This is to test forward "
+                                 "compatibility with future versions of "
+                                 "SwiftSyntax that might add more fields to "
+                                 "syntax nodes."));
+
+static llvm::cl::opt<bool>
+IncrementalSerialization("incremental-serialization",
+                         llvm::cl::desc("If specified, the serialized syntax "
+                                        "tree will omit nodes that have not "
+                                        "changed since the last parse."));
+
 static llvm::cl::opt<std::string>
 OutputFilename("output-filename",
                llvm::cl::desc("Path to the output file"));
+
+static llvm::cl::opt<std::string>
+DiagsOutputFilename("diags-output-filename",
+  llvm::cl::desc("Path to the output file for parser diagnostics text"));
 
 static llvm::cl::opt<bool>
 PrintVisualReuseInfo("print-visual-reuse-info",
@@ -185,6 +217,11 @@ Visual("v",
        llvm::cl::desc("Print visually"),
        llvm::cl::cat(Category),
        llvm::cl::init(false));
+
+static llvm::cl::opt<std::string>
+GraphVisPath("output-request-graphviz",
+             llvm::cl::desc("Emit GraphViz output visualizing the request graph."),
+             llvm::cl::cat(Category));
 } // end namespace options
 
 namespace {
@@ -192,14 +229,13 @@ namespace {
 // A utility class to wrap a source range consisting of a byte start and end
 // offset
 struct ByteBasedSourceRange {
-  unsigned Start;
-  unsigned End;
+  uintptr_t Start;
+  uintptr_t End;
 
-  ByteBasedSourceRange(unsigned Start, unsigned End) : Start(Start), End(End) {
+  ByteBasedSourceRange(uintptr_t Start, uintptr_t End)
+      : Start(Start), End(End) {
     assert(Start <= End);
   }
-  ByteBasedSourceRange(std::pair<unsigned, unsigned> Pair)
-      : ByteBasedSourceRange(Pair.first, Pair.second) {}
   ByteBasedSourceRange() : ByteBasedSourceRange(0, 0) {}
 
   ByteBasedSourceRange intersect(const ByteBasedSourceRange &Other) {
@@ -214,11 +250,10 @@ struct ByteBasedSourceRange {
 
   bool empty() { return Start == End; }
 
-  SourceRange toSourceRange(SourceManager &SourceMgr, unsigned BufferID) {
+  CharSourceRange toCharSourceRange(SourceManager &SourceMgr, unsigned BufferID) {
     auto StartLoc = SourceMgr.getLocForOffset(BufferID, Start);
-    // SourceRange includes the last offset, we don't. So subtract 1
-    auto EndLoc = SourceMgr.getLocForOffset(BufferID, End - 1);
-    return SourceRange(StartLoc, EndLoc);
+    auto EndLoc = SourceMgr.getLocForOffset(BufferID, End);
+    return CharSourceRange(SourceMgr, StartLoc, EndLoc);
   }
 };
 
@@ -228,10 +263,9 @@ struct ByteBasedSourceRangeSet {
 
   ByteBasedSourceRangeSet() {}
 
-  ByteBasedSourceRangeSet(
-      std::vector<std::pair<unsigned, unsigned>> PairVector) {
-    for (auto Pair : PairVector) {
-      addRange(Pair);
+  ByteBasedSourceRangeSet(std::vector<SyntaxReuseRegion> Ranges) {
+    for (auto Range : Ranges) {
+      addRange({Range.Start.getOffset(), Range.End.getOffset()});
     }
   }
 
@@ -411,7 +445,8 @@ bool useColoredOutput() {
 
 void printVisualNodeReuseInformation(SourceManager &SourceMgr,
                                      unsigned BufferID,
-                                     SyntaxParsingCache *Cache) {
+                                     SyntaxParsingCache *Cache,
+                                     const SourceFileSyntax &NewSyntaxTree) {
   unsigned CurrentOffset = 0;
   auto SourceText = SourceMgr.getEntireTextForBuffer(BufferID);
   if (useColoredOutput()) {
@@ -437,13 +472,14 @@ void printVisualNodeReuseInformation(SourceManager &SourceMgr,
     }
   };
 
-  for (auto ReuseRange : Cache->getReusedRanges()) {
+  for (auto ReuseRange : Cache->getReusedRegions(NewSyntaxTree)) {
+    auto StartOffset = ReuseRange.Start.getOffset();
+    auto EndOffset = ReuseRange.End.getOffset();
     // Print region that was not reused
-    PrintReparsedRegion(SourceText, CurrentOffset, ReuseRange.first);
+    PrintReparsedRegion(SourceText, CurrentOffset, StartOffset);
 
-    llvm::outs() << SourceText.substr(ReuseRange.first,
-                                      ReuseRange.second - ReuseRange.first);
-    CurrentOffset = ReuseRange.second;
+    llvm::outs() << SourceText.substr(StartOffset, EndOffset - StartOffset);
+    CurrentOffset = EndOffset;
   }
   PrintReparsedRegion(SourceText, CurrentOffset, SourceText.size());
   if (useColoredOutput())
@@ -452,21 +488,17 @@ void printVisualNodeReuseInformation(SourceManager &SourceMgr,
   llvm::outs() << '\n';
 }
 
-void saveReuseLog(SourceManager &SourceMgr, unsigned BufferID,
-                  SyntaxParsingCache *Cache) {
+void saveReuseLog(SyntaxParsingCache *Cache,
+                  const SourceFileSyntax &NewSyntaxTree) {
   std::error_code ErrorCode;
   llvm::raw_fd_ostream ReuseLog(options::IncrementalReuseLog, ErrorCode,
-                                llvm::sys::fs::OpenFlags::F_RW);
+                                llvm::sys::fs::FA_Read |
+                                    llvm::sys::fs::FA_Write);
   assert(!ErrorCode && "Unable to open incremental usage log");
 
-  for (auto ReuseRange : Cache->getReusedRanges()) {
-    SourceLoc Start = SourceMgr.getLocForOffset(BufferID, ReuseRange.first);
-    SourceLoc End = SourceMgr.getLocForOffset(BufferID, ReuseRange.second);
-
-    ReuseLog << "Reused ";
-    Start.printLineAndColumn(ReuseLog, SourceMgr, BufferID);
-    ReuseLog << " to ";
-    End.printLineAndColumn(ReuseLog, SourceMgr, BufferID);
+  for (auto ReuseRange : Cache->getReusedRegions(NewSyntaxTree)) {
+    ReuseLog << "Reused " << ReuseRange.Start << " to " << ReuseRange.End
+             << '\n';
     ReuseLog << '\n';
   }
 }
@@ -477,7 +509,7 @@ bool verifyReusedRegions(ByteBasedSourceRangeSet ExpectedReparseRegions,
                          SourceFile *SF) {
   // We always expect the EOF token to be reparsed. Don't complain about it.
   auto Eof = SF->getSyntaxRoot().getChild(SourceFileSyntax::Cursor::EOFToken);
-  auto EofNodeStart = Eof->getAbsolutePositionWithLeadingTrivia().getOffset();
+  auto EofNodeStart = Eof->getAbsolutePositionBeforeLeadingTrivia().getOffset();
   if (ExpectedReparseRegions.Ranges.back().End >= EofNodeStart) {
     // If the last expected reparse region already covers part of the eof
     // leading trivia, extended it
@@ -495,7 +527,8 @@ bool verifyReusedRegions(ByteBasedSourceRangeSet ExpectedReparseRegions,
   auto FileLength = SourceMgr.getRangeForBuffer(BufferID).getByteLength();
 
   // Compute the repared regions by inverting the reused regions
-  auto ReusedRanges = ByteBasedSourceRangeSet(SyntaxCache->getReusedRanges());
+  auto ReusedRanges = ByteBasedSourceRangeSet(
+      SyntaxCache->getReusedRegions(SF->getSyntaxRoot()));
   auto ReparsedRegions = ReusedRanges.invert(FileLength);
 
   // Same for expected reuse regions
@@ -509,12 +542,11 @@ bool verifyReusedRegions(ByteBasedSourceRangeSet ExpectedReparseRegions,
   bool NoUnexpectedParse = true;
 
   for (auto ReparseRegion : UnexpectedReparseRegions.Ranges) {
-    auto ReparseRange = ReparseRegion.toSourceRange(SourceMgr, BufferID);
+    auto ReparseRange = ReparseRegion.toCharSourceRange(SourceMgr, BufferID);
 
     // To improve the ergonomics when writing tests we do not want to complain
     // about reparsed whitespaces.
-    auto RangeStr =
-        CharSourceRange(SourceMgr, ReparseRange.Start, ReparseRange.End).str();
+    auto RangeStr = ReparseRange.str();
     llvm::Regex WhitespaceOnlyRegex("^[ \t\r\n]*$");
     if (WhitespaceOnlyRegex.match(RangeStr)) {
       continue;
@@ -528,10 +560,17 @@ bool verifyReusedRegions(ByteBasedSourceRangeSet ExpectedReparseRegions,
   return NoUnexpectedParse;
 }
 
+struct ParseInfo {
+  SourceFile *SF;
+  SyntaxParsingCache *SyntaxCache;
+  std::string Diags;
+};
+
 /// Parse the given input file (incrementally if an old syntax tree was
 /// provided) and call the action specific callback with the new syntax tree
-int parseFile(const char *MainExecutablePath, const StringRef InputFileName,
-              llvm::function_ref<int(SourceFile *)> ActionSpecificCallback) {
+int parseFile(
+    const char *MainExecutablePath, const StringRef InputFileName,
+    llvm::function_ref<int(ParseInfo)> ActionSpecificCallback) {
   // The cache needs to be a heap allocated pointer since we construct it inside
   // an if block but need to keep it alive until the end of the function.
   SyntaxParsingCache *SyntaxCache = nullptr;
@@ -553,8 +592,6 @@ int parseFile(const char *MainExecutablePath, const StringRef InputFileName,
     }
     SyntaxCache = new SyntaxParsingCache(OldSyntaxTree.getValue());
 
-    SyntaxCache->setRecordReuseInformation();
-
     if (options::OldSourceFilename.empty()) {
       llvm::errs() << "The old syntax file must be provided to translate "
                       "line:column edits to byte offsets";
@@ -569,15 +606,21 @@ int parseFile(const char *MainExecutablePath, const StringRef InputFileName,
   // Set up the compiler invocation
   CompilerInvocation Invocation;
   Invocation.getLangOptions().BuildSyntaxTree = true;
+  Invocation.getLangOptions().ParseForSyntaxTreeOnly = true;
   Invocation.getLangOptions().VerifySyntaxTree = options::VerifySyntaxTree;
+  Invocation.getLangOptions().RequestEvaluatorGraphVizPath = options::GraphVisPath;
   Invocation.getFrontendOptions().InputsAndOutputs.addInputFile(InputFileName);
+  if (InputFileName.endswith(".swiftinterface"))
+    Invocation.setInputKind(InputFileKind::SwiftModuleInterface);
   Invocation.setMainExecutablePath(
     llvm::sys::fs::getMainExecutable(MainExecutablePath,
       reinterpret_cast<void *>(&anchorForGetMainExecutable)));
   Invocation.setMainFileSyntaxParsingCache(SyntaxCache);
   Invocation.setModuleName("Test");
 
-  PrintingDiagnosticConsumer DiagConsumer;
+  std::string DiagsString;
+  llvm::raw_string_ostream DiagOS(DiagsString);
+  PrintingDiagnosticConsumer DiagConsumer(DiagOS);
   CompilerInstance Instance;
   Instance.addDiagnosticConsumer(&DiagConsumer);
   if (Instance.setup(Invocation)) {
@@ -609,10 +652,10 @@ int parseFile(const char *MainExecutablePath, const StringRef InputFileName,
   if (SyntaxCache) {
     if (options::PrintVisualReuseInfo) {
       printVisualNodeReuseInformation(Instance.getSourceMgr(), BufferID,
-                                      SyntaxCache);
+                                      SyntaxCache, SF->getSyntaxRoot());
     }
     if (!options::IncrementalReuseLog.empty()) {
-      saveReuseLog(Instance.getSourceMgr(), BufferID, SyntaxCache);
+      saveReuseLog(SyntaxCache, SF->getSyntaxRoot());
     }
     ByteBasedSourceRangeSet ExpectedReparseRegions;
 
@@ -627,7 +670,8 @@ int parseFile(const char *MainExecutablePath, const StringRef InputFileName,
     }
   }
 
-  int ActionSpecificExitCode = ActionSpecificCallback(SF);
+  int ActionSpecificExitCode =
+    ActionSpecificCallback({SF, SyntaxCache, DiagOS.str()});
   if (ActionSpecificExitCode != EXIT_SUCCESS) {
     return ActionSpecificExitCode;
   } else {
@@ -671,8 +715,7 @@ int doDumpRawTokenSyntax(const StringRef InputFile) {
   }
 
   for (auto TokAndPos : Tokens) {
-    TokAndPos.second.printLineAndColumn(llvm::outs());
-    llvm::outs() << "\n";
+    llvm::outs() << TokAndPos.second << "\n";
     TokAndPos.first->dump(llvm::outs());
     llvm::outs() << "\n";
   }
@@ -682,31 +725,93 @@ int doDumpRawTokenSyntax(const StringRef InputFile) {
 
 int doFullParseRoundTrip(const char *MainExecutablePath,
                          const StringRef InputFile) {
-  return parseFile(MainExecutablePath, InputFile, [](SourceFile *SF) -> int {
-    SF->getSyntaxRoot().print(llvm::outs(), {});
+  return parseFile(MainExecutablePath, InputFile,
+    [](ParseInfo info) -> int {
+    info.SF->getSyntaxRoot().print(llvm::outs(), {});
     return EXIT_SUCCESS;
   });
 }
 
 int doSerializeRawTree(const char *MainExecutablePath,
                        const StringRef InputFile) {
-  return parseFile(MainExecutablePath, InputFile, [](SourceFile *SF) -> int {
+  return parseFile(MainExecutablePath, InputFile,
+    [](ParseInfo info) -> int {
+    auto SF = info.SF;
+    auto SyntaxCache = info.SyntaxCache;
     auto Root = SF->getSyntaxRoot().getRaw();
-
-    if (!options::OutputFilename.empty()) {
-      std::error_code errorCode;
-      llvm::raw_fd_ostream os(options::OutputFilename, errorCode,
-                              llvm::sys::fs::F_None);
-      assert(!errorCode && "Couldn't open output file");
-
-      swift::json::Output out(os);
-      out << *Root;
-      os << "\n";
-    } else {
-      swift::json::Output out(llvm::outs());
-      out << *Root;
-      llvm::outs() << "\n";
+    std::unordered_set<unsigned> ReusedNodeIds;
+    if (options::IncrementalSerialization && SyntaxCache) {
+      ReusedNodeIds = SyntaxCache->getReusedNodeIds();
     }
+
+    if (options::SerializeAsByteTree) {
+      if (options::OutputFilename.empty()) {
+        llvm::errs() << "Cannot serialize syntax tree as ByteTree to stdout\n";
+        return EXIT_FAILURE;
+      }
+
+      auto Stream = ExponentialGrowthAppendingBinaryByteStream();
+      Stream.reserve(32 * 1024);
+      std::map<void *, void *> UserInfo;
+      UserInfo[swift::byteTree::UserInfoKeyReusedNodeIds] = &ReusedNodeIds;
+      if (options::AddByteTreeFields) {
+        UserInfo[swift::byteTree::UserInfoKeyAddInvalidFields] = (void *)true;
+      }
+      swift::byteTree::ByteTreeWriter::write(Stream,
+                                             byteTree::SYNTAX_TREE_VERSION,
+                                             *Root, UserInfo);
+      auto OutputBufferOrError = llvm::FileOutputBuffer::create(
+          options::OutputFilename, Stream.data().size());
+      assert(OutputBufferOrError && "Couldn't open output file");
+      auto &OutputBuffer = OutputBufferOrError.get();
+      memcpy(OutputBuffer->getBufferStart(), Stream.data().data(),
+             Stream.data().size());
+      auto Error = OutputBuffer->commit();
+      (void)Error;
+      assert(!Error && "Unable to write output file");
+    } else {
+      // Serialize as JSON
+      auto SerializeTree = [&ReusedNodeIds](llvm::raw_ostream &os,
+                                            RC<RawSyntax> Root,
+                                            SyntaxParsingCache *SyntaxCache) {
+        swift::json::Output::UserInfoMap JsonUserInfo;
+        JsonUserInfo[swift::json::OmitNodesUserInfoKey] = &ReusedNodeIds;
+        if (options::OmitNodeIds) {
+          JsonUserInfo[swift::json::DontSerializeNodeIdsUserInfoKey] =
+              (void *)true;
+        }
+        swift::json::Output out(os, JsonUserInfo);
+        out << *Root;
+        os << "\n";
+      };
+
+      if (!options::OutputFilename.empty()) {
+        std::error_code errorCode;
+        llvm::raw_fd_ostream os(options::OutputFilename, errorCode,
+                                llvm::sys::fs::F_None);
+        assert(!errorCode && "Couldn't open output file");
+        SerializeTree(os, Root, SyntaxCache);
+      } else {
+        SerializeTree(llvm::outs(), Root, SyntaxCache);
+      }
+    }
+
+    if (!options::DiagsOutputFilename.empty()) {
+      std::error_code errorCode;
+      llvm::raw_fd_ostream os(options::DiagsOutputFilename, errorCode,
+                              llvm::sys::fs::F_None);
+      if (errorCode) {
+        llvm::errs() << "error opening file '" << options::DiagsOutputFilename
+          << "': " << errorCode.message() << '\n';
+        return EXIT_FAILURE;
+      }
+      if (!info.Diags.empty())
+        os << info.Diags << '\n';
+    } else {
+      if (!info.Diags.empty())
+        llvm::errs() << info.Diags << '\n';
+    }
+
     return EXIT_SUCCESS;
   });
 }
@@ -717,7 +822,7 @@ int doDeserializeRawTree(const char *MainExecutablePath,
 
   auto Buffer = llvm::MemoryBuffer::getFile(InputFile);
   std::error_code errorCode;
-  auto os = llvm::make_unique<llvm::raw_fd_ostream>(
+  auto os = std::make_unique<llvm::raw_fd_ostream>(
               OutputFileName, errorCode, llvm::sys::fs::F_None);
   swift::json::SyntaxDeserializer deserializer(llvm::MemoryBufferRef(*(Buffer.get())));
   deserializer.getSourceFileSyntax()->print(*os);
@@ -726,25 +831,29 @@ int doDeserializeRawTree(const char *MainExecutablePath,
 }
 
 int doParseOnly(const char *MainExecutablePath, const StringRef InputFile) {
-  return parseFile(MainExecutablePath, InputFile, [](SourceFile *SF) {
-    return SF ? EXIT_SUCCESS : EXIT_FAILURE;
+  return parseFile(MainExecutablePath, InputFile,
+    [](ParseInfo info) {
+    return info.SF ? EXIT_SUCCESS : EXIT_FAILURE;
   });
 }
 
 int dumpParserGen(const char *MainExecutablePath, const StringRef InputFile) {
-  return parseFile(MainExecutablePath, InputFile, [](SourceFile *SF) {
+  return parseFile(MainExecutablePath, InputFile,
+    [](ParseInfo info) {
     SyntaxPrintOptions Opts;
     Opts.PrintSyntaxKind = options::PrintNodeKind;
     Opts.Visual = options::Visual;
     Opts.PrintTrivialNodeKind = options::PrintTrivialNodeKind;
-    SF->getSyntaxRoot().print(llvm::outs(), Opts);
+    info.SF->getSyntaxRoot().print(llvm::outs(), Opts);
     return EXIT_SUCCESS;
   });
 }
 
 int dumpEOFSourceLoc(const char *MainExecutablePath,
                      const StringRef InputFile) {
-  return parseFile(MainExecutablePath, InputFile, [](SourceFile *SF) -> int {
+  return parseFile(MainExecutablePath, InputFile,
+    [](ParseInfo info) -> int {
+    auto SF = info.SF;
     auto BufferId = *SF->getBufferID();
     auto Root = SF->getSyntaxRoot();
     auto AbPos = Root.getEOFToken().getAbsolutePosition();
@@ -765,8 +874,8 @@ int dumpEOFSourceLoc(const char *MainExecutablePath,
 }
 }// end of anonymous namespace
 
-int invokeCommand(const char *MainExecutablePath,
-                  const StringRef InputSourceFilename) {
+static int invokeCommand(const char *MainExecutablePath,
+                         const StringRef InputSourceFilename) {
   int ExitCode = EXIT_SUCCESS;
   
   switch (options::Action) {
@@ -810,7 +919,7 @@ int main(int argc, char *argv[]) {
   llvm::cl::ParseCommandLineOptions(argc, argv, "Swift Syntax Test\n");
 
   int ExitCode = EXIT_SUCCESS;
-
+  
   if (options::InputSourceFilename.empty() &&
       options::InputSourceDirectory.empty()) {
     llvm::errs() << "input source file is required\n";

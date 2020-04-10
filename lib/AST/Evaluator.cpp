@@ -15,13 +15,14 @@
 //
 //===----------------------------------------------------------------------===//
 #include "swift/AST/Evaluator.h"
+#include "swift/AST/DiagnosticEngine.h"
 #include "swift/Basic/Range.h"
+#include "swift/Basic/SourceManager.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/Support/Debug.h"
+#include "llvm/Support/FileSystem.h"
 
 using namespace swift;
-
-AnyRequest::HolderBase::~HolderBase() { }
 
 std::string AnyRequest::getAsString() const {
   std::string result;
@@ -32,47 +33,85 @@ std::string AnyRequest::getAsString() const {
   return result;
 }
 
-Evaluator::Evaluator(DiagnosticEngine &diags,
-                     CycleDiagnosticKind shouldDiagnoseCycles)
-  : diags(diags), shouldDiagnoseCycles(shouldDiagnoseCycles) { }
+AbstractRequestFunction *
+Evaluator::getAbstractRequestFunction(uint8_t zoneID, uint8_t requestID) const {
+  for (const auto &zone : requestFunctionsByZone) {
+    if (zone.first == zoneID) {
+      if (requestID < zone.second.size())
+        return zone.second[requestID];
 
-bool Evaluator::checkDependency(const AnyRequest &request) {
-  // If there is an active request, record it's dependency on this request.
-  if (!activeRequests.empty())
-    dependencies[activeRequests.back()].push_back(request);
-
-  // Record this as an active request.
-  if (activeRequests.insert(request)) {
-    return false;
+      return nullptr;
+    }
   }
 
-  // Diagnose cycle.
-  switch (shouldDiagnoseCycles) {
-  case CycleDiagnosticKind::NoDiagnose:
-    return true;
+  return nullptr;
+}
 
-  case CycleDiagnosticKind::DebugDiagnose: {
+void Evaluator::registerRequestFunctions(
+                               Zone zone,
+                               ArrayRef<AbstractRequestFunction *> functions) {
+  uint8_t zoneID = static_cast<uint8_t>(zone);
+#ifndef NDEBUG
+  for (const auto &zone : requestFunctionsByZone) {
+    assert(zone.first != zoneID);
+  }
+#endif
+
+  requestFunctionsByZone.push_back({zoneID, functions});
+}
+
+Evaluator::Evaluator(DiagnosticEngine &diags,
+                     bool debugDumpCycles,
+                     bool buildDependencyGraph)
+  : diags(diags),
+    debugDumpCycles(debugDumpCycles),
+    buildDependencyGraph(buildDependencyGraph) { }
+
+void Evaluator::emitRequestEvaluatorGraphViz(llvm::StringRef graphVizPath) {
+  std::error_code error;
+  llvm::raw_fd_ostream out(graphVizPath, error, llvm::sys::fs::F_Text);
+  printDependenciesGraphviz(out);
+}
+
+bool Evaluator::checkDependency(const ActiveRequest &request) {
+  if (buildDependencyGraph) {
+    // Insert the request into the dependency graph if we haven't already.
+    auto req = AnyRequest(request);
+    dependencies.insert({req, {}});
+
+    // If there is an active request, record it's dependency on this request.
+    if (!activeRequests.empty()) {
+      auto activeDeps = dependencies.find_as(activeRequests.back());
+      assert(activeDeps != dependencies.end());
+      activeDeps->second.push_back(req);
+    }
+  }
+
+  // Record this as an active request.
+  if (activeRequests.insert(request))
+    return false;
+
+  // Diagnose cycle.
+  diagnoseCycle(request);
+  return true;
+}
+
+void Evaluator::diagnoseCycle(const ActiveRequest &request) {
+  if (debugDumpCycles) {
     llvm::errs() << "===CYCLE DETECTED===\n";
     llvm::DenseSet<AnyRequest> visitedAnywhere;
     llvm::SmallVector<AnyRequest, 4> visitedAlongPath;
     std::string prefixStr;
-    printDependencies(activeRequests.front(), llvm::errs(), visitedAnywhere,
-                      visitedAlongPath, activeRequests.getArrayRef(),
+    SmallVector<AnyRequest, 8> highlightPath;
+    for (auto &req : activeRequests)
+      highlightPath.push_back(AnyRequest(req));
+    printDependencies(AnyRequest(activeRequests.front()), llvm::errs(),
+                      visitedAnywhere, visitedAlongPath, highlightPath,
                       prefixStr, /*lastChild=*/true);
-    return true;
   }
 
-  case CycleDiagnosticKind::FullDiagnose:
-    diagnoseCycle(request);
-    return true;
-  }
-
-  return true;
-}
-
-void Evaluator::diagnoseCycle(const AnyRequest &request) {
   request.diagnoseCycle(diags);
-  for (const auto &step : reversed(activeRequests)) {
+  for (const auto &step : llvm::reverse(activeRequests)) {
     if (step == request) return;
 
     step.noteCycleStep(diags);
@@ -111,7 +150,7 @@ void Evaluator::printDependencies(
   auto cachedValue = cache.find(request);
   if (cachedValue != cache.end()) {
     out << " -> ";
-    PrintEscapedString(cachedValue->second.getAsString(), out);
+    printEscapedString(cachedValue->second.getAsString(), out);
   }
 
   if (!visitedAnywhere.insert(request).second) {
@@ -163,15 +202,6 @@ void Evaluator::printDependencies(
     assert(visitedAlongPath.back() == request);
     visitedAlongPath.pop_back();
   }
-}
-
-void Evaluator::printDependencies(const AnyRequest &request,
-                                  llvm::raw_ostream &out) const {
-  std::string prefixStr;
-  llvm::DenseSet<AnyRequest> visitedAnywhere;
-  llvm::SmallVector<AnyRequest, 4> visitedAlongPath;
-  printDependencies(request, out, visitedAnywhere, visitedAlongPath, { },
-                    prefixStr, /*lastChild=*/true);
 }
 
 void Evaluator::dumpDependencies(const AnyRequest &request) const {
@@ -233,30 +263,101 @@ void Evaluator::printDependenciesGraphviz(llvm::raw_ostream &out) const {
   out << "digraph Dependencies {\n";
 
   // Emit the edges.
+  llvm::DenseMap<AnyRequest, unsigned> inDegree;
   for (const auto &source : allRequests) {
     auto known = dependencies.find(source);
     assert(known != dependencies.end());
     for (const auto &target : known->second) {
       out << "  " << getNodeName(source) << " -> " << getNodeName(target)
           << ";\n";
+      ++inDegree[target];
     }
   }
 
   out << "\n";
+
+  static const char *colorNames[] = {
+    "aquamarine",
+    "blueviolet",
+    "brown",
+    "burlywood",
+    "cadetblue",
+    "chartreuse",
+    "chocolate",
+    "coral",
+    "cornflowerblue",
+    "crimson"
+  };
+  const unsigned numColorNames = sizeof(colorNames) / sizeof(const char *);
+
+  llvm::DenseMap<unsigned, unsigned> knownBuffers;
+  auto getColor = [&](const AnyRequest &request) -> Optional<const char *> {
+    SourceLoc loc = request.getNearestLoc();
+    if (loc.isInvalid())
+      return None;
+
+    unsigned bufferID = diags.SourceMgr.findBufferContainingLoc(loc);
+    auto knownId = knownBuffers.find(bufferID);
+    if (knownId == knownBuffers.end()) {
+      knownId = knownBuffers.insert({bufferID, knownBuffers.size()}).first;
+    }
+    return colorNames[knownId->second % numColorNames];
+  };
 
   // Emit the nodes.
   for (unsigned i : indices(allRequests)) {
     const auto &request = allRequests[i];
     out << "  " << getNodeName(request);
     out << " [label=\"";
-    PrintEscapedString(request.getAsString(), out);
+    printEscapedString(request.getAsString(), out);
 
     auto cachedValue = cache.find(request);
     if (cachedValue != cache.end()) {
       out << " -> ";
-      PrintEscapedString(cachedValue->second.getAsString(), out);
+      printEscapedString(cachedValue->second.getAsString(), out);
     }
-    out << "\"];\n";
+    out << "\"";
+
+    if (auto color = getColor(request)) {
+      out << ", fillcolor=\"" << *color << "\"";
+    }
+
+    out << "];\n";
+  }
+
+  // Emit "fake" nodes for each of the source buffers we encountered, so
+  // we know which file we're working from.
+  // FIXME: This approximates a "top level" request for, e.g., type checking
+  // an entire source file.
+  std::vector<unsigned> sourceBufferIDs;
+  for (const auto &element : knownBuffers) {
+    sourceBufferIDs.push_back(element.first);
+  }
+  std::sort(sourceBufferIDs.begin(), sourceBufferIDs.end());
+  for (unsigned bufferID : sourceBufferIDs) {
+    out << "  buffer_" << bufferID << "[label=\"";
+    printEscapedString(diags.SourceMgr.getIdentifierForBuffer(bufferID), out);
+    out << "\"";
+
+    out << ", shape=\"box\"";
+    out << ", fillcolor=\""
+        << colorNames[knownBuffers[bufferID] % numColorNames] << "\"";
+    out << "];\n";
+  }
+
+  // Emit "false" dependencies from source buffer IDs to any requests that (1)
+  // have no other incomining edges and (2) can be associated with a source
+  // buffer.
+  for (const auto &request : allRequests) {
+    if (inDegree[request] > 0)
+      continue;
+
+    SourceLoc loc = request.getNearestLoc();
+    if (loc.isInvalid())
+      continue;
+
+    unsigned bufferID = diags.SourceMgr.findBufferContainingLoc(loc);
+    out << "  buffer_" << bufferID << " -> " << getNodeName(request) << ";\n";
   }
 
   // Done!

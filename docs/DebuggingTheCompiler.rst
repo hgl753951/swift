@@ -67,6 +67,33 @@ print the SIL *and* the LLVM IR, you have to run the compiler twice.
 The output of all these dump options (except ``-dump-ast``) can be redirected
 with an additional ``-o <file>`` option.
 
+Debugging Diagnostic Emission
+-----------------------------
+
+Asserting on first emitted Warning/Assert Diagnostic
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+When changing the type checker and various SIL passes, one can cause a series of
+cascading diagnostics (errors/warnings) to be emitted. Since Swift does not by
+default assert when emitting such diagnostics, it becomes difficult to know
+where to stop in the debugger. Rather than trying to guess/check if one has an
+asserts swift compiler, one can use the following options to cause the
+diagnostic engine to assert on the first error/warning:
+
+* -Xllvm -swift-diagnostics-assert-on-error=1
+* -Xllvm -swift-diagnostics-assert-on-warning=1
+
+These allow one to dump a stack trace of where the diagnostic is being emitted
+(if run without a debugger) or drop into the debugger if a debugger is attached.
+
+Finding Diagnostic Names
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Some diagnostics rely heavily on format string arguments, so it can be difficult
+to find their implementation by searching for parts of the emitted message in
+the codebase. To print the corresponding diagnostic name at the end of each
+emitted message, use the ``-Xfrontend -debug-diagnostic-names`` argument.
+
 Debugging the Type Checker
 --------------------------
 
@@ -131,38 +158,72 @@ typing ``:constraints debug on``::
   ***  Type ':help' for assistance.              ***
   (swift) :constraints debug on
 
-Asserting on First Error
-~~~~~~~~~~~~~~~~~~~~~~~~
-
-When changing the typechecker, one can cause a series of cascading errors. Since
-Swift doesn't assert on such errors, one has to know more about the typechecker
-to know where to stop in the debugger. Rather than doing that, one can use the
-option ``-Xllvm -swift-diagnostics-assert-on-error=1`` to cause the
-DiagnosticsEngine to assert upon the first error, providing the signal that the
-debugger needs to know that it should attach.
-
 Debugging on SIL Level
 ----------------------
 
 Options for Dumping the SIL
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Often it is not sufficient to dump the SIL at the beginning or end of the
-optimization pipeline.
-The SILPassManager supports useful options to dump the SIL also between
-pass runs.
+Often it is not sufficient to dump the SIL at the beginning or end of
+the optimization pipeline. The SILPassManager supports useful options
+to dump the SIL also between pass runs.
 
-The option ``-Xllvm -sil-print-all`` dumps the whole SIL module after all
-passes. Although it prints only functions which were changed by a pass, the
-output can get *very* large.
+The SILPassManager's SIL dumping options vary along two orthogonal
+functional axes:
 
-It is useful if you identified a problem in the final SIL and you want to
-check which pass did introduce the wrong SIL.
+1. Options that control if functions/modules are printed.
+2. Options that filter what is printed at those points.
 
-There are several other options available, e.g. to filter the output by
-function names (``-Xllvm -sil-print-only-function``/``s``) or by pass names
-(``-Xllvm -sil-print-before``/``after``/``around``).
-For details see ``PassManager.cpp``.
+One generally always specifies an option of type 1 and optionally adds
+an option of type 2 to filter the output.
+
+A short (non-exhaustive) list of type 1 options:
+
+* ``-Xllvm -sil-print-all``: Print functions/modules when ever a
+  function pass modifies a function and Print the entire module
+  (modulo filtering) if a module pass modifies a SILModule.
+
+A short (non-exhaustive) list of type 2 options:
+
+* ``-Xllvm -sil-print-around=$PASS_NAME``: Print a function/module
+  before and after a function pass with name ``$PASS_NAME`` runs on a
+  function/module or dump a module before a module pass with name
+  ``$PASS_NAME`` runs on a module.
+
+* ``-Xllvm -sil-print-before=$PASS_NAME``: Print a function/module
+  before a function pass with name ``$PASS_NAME`` runs on a
+  function/module or dump a module before a module pass with name
+  ``$PASS_NAME`` runs on a module. NOTE: This happens even without
+  sil-print-all set!
+
+* ``-Xllvm -sil-print-after=$PASS_NAME``: Print a function/module
+  after a function pass with name ``$PASS_NAME`` runs on a
+  function/module or dump a module before a module pass with name
+  ``$PASS_NAME`` runs on a module.
+
+* ``-Xllvm '-sil-print-only-function=SWIFT_MANGLED_NAME'``: When ever
+  one would print a function/module, only print the given function.
+
+These options together allow one to visualize how a
+SILFunction/SILModule is optimized by the optimizer as each
+optimization pass runs easily via formulations like::
+
+    swiftc -Xllvm '-sil-print-only-function=$myMainFunction' -Xllvm -sil-print-all
+
+NOTE: This may emit a lot of text to stderr, so be sure to pipe the
+output to a file.
+
+Getting CommandLine for swift stdlib from Ninja
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+If one builds swift using ninja and wants to dump the SIL of the
+stdlib using some of the SIL dumping options from the previous
+section, one can use the following one-liner::
+
+  ninja -t commands | grep swiftc | grep Swift.o | grep " -c "
+
+This should give one a single command line that one can use for
+Swift.o, perfect for applying the previous sections options to.
 
 Dumping the SIL and other Data in LLDB
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -196,6 +257,11 @@ This opens a preview window containing the CFG of the function. To continue
 debugging press <CTRL>-C on the LLDB prompt.
 Note that this only works in Xcode if the PATH variable in the scheme's
 environment setting contains the path to the dot tool.
+
+swift/Basic/Debug.h includes macros to help contributors declare these methods
+with the proper attributes to ensure they'll be available in the debugger. In
+particular, if you see ``SWIFT_DEBUG_DUMP`` in a class declaration, that class
+has a ``dump()`` method you can call.
 
 Debugging and Profiling on SIL level
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -337,6 +403,17 @@ we know to ignore swift_getGenericMetadata 84 times, i.e.::
 
     (lldb) br set -i 84 -n GlobalARCOpts::run
 
+A final trick is that one can use the -R option to stop at a relative assembly
+address in lldb. Specifically, lldb resolves the breakpoint normally and then
+just adds the argument -R to the address. So for instance, if I want to stop at
+the address at +38 in the function with the name 'foo', I would write::
+
+    (lldb) br set -R 38 -n foo
+
+Then lldb would add 38 to the offset of foo and break there. This is really
+useful in contexts where one wants to set a breakpoint at an assembly address
+that is stable across multiple different invocations of lldb.
+
 LLDB Scripts
 ~~~~~~~~~~~~
 
@@ -437,6 +514,63 @@ reducing SIL test cases by:
 For more information and a high level example, see:
 ./swift/utils/bug_reducer/README.md.
 
+Using ``clang-tidy`` to run the Static Analyzer
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Recent versions of LLVM package the tool ``clang-tidy``. This can be used in
+combination with a json compilation database to run static analyzer checks as
+well as cleanups/modernizations on a code-base. Swift's cmake invocation by
+default creates one of these json databases at the root path of the swift host
+build, for example on macOS::
+
+    $PATH_TO_BUILD/swift-macosx-x86_64/compile_commands.json
+
+Using this file, one invokes ``clang-tidy`` on a specific file in the codebase
+as follows::
+
+    clang-tidy -p=$PATH_TO_BUILD/swift-macosx-x86_64/compile_commands.json $FULL_PATH_TO_FILE
+
+One can also use shell regex to visit multiple files in the same directory. Example::
+
+    clang-tidy -p=$PATH_TO_BUILD/swift-macosx-x86_64/compile_commands.json $FULL_PATH_TO_DIR/*.cpp
+
+Identifying an optimizer bug
+----------------------------
+
+If a compiled executable is crashing when built with optimizations, but not
+crashing when built with -Onone, it's most likely one of the SIL optimizations
+which causes the miscompile.
+
+Currently there is no tool to automatically identify the bad optimization, but
+it's quite easy to do this manually:
+
+1. Find the offending optimization with bisecting:
+
+  a. Add the compiler option ``-Xllvm -sil-opt-pass-count=<n>``, where ``<n>``
+     is the number of optimizations to run.
+  b. Bisect: find n where the executable crashes, but does not crash with n-1.
+     Note that n can be quite large, e.g. > 100000 (just try
+     n = 10, 100, 1000, 10000, etc. to find an upper bound).
+  c. Add another option ``-Xllvm -sil-print-pass-name``. The output can be
+     large, so it's best to redirect stderr to a file (``2> output``).
+     In the output search for the last pass before ``stage Address Lowering``.
+     It should be the ``Run #<n-1>``. This line tells you the name of the bad
+     optimization pass and on which function it run.
+
+2. Get the SIL before and after the bad optimization.
+
+  a. Add the compiler options
+     ``-Xllvm -sil-print-all -Xllvm -sil-print-only-function='<function>'``
+     where ``<function>`` is the function name (including the preceding ``$``).
+     For example:
+     ``-Xllvm -sil-print-all -Xllvm -sil-print-only-function='$s4test6testityS2iF'``.
+     Again, the output can be large, so it's best to redirect stderr to a file.
+  b. From the output, copy the SIL of the function *before* the bad
+     run into a separate file and the SIL *after* the bad run into a file.
+  c. Compare both SIL files and try to figure out what the optimization pass
+     did wrong. To simplify the comparison, it's sometimes helpful to replace
+     all SIL values (e.g. ``%27``) with a constant string (e.g. ``%x``).
+
 
 Debugging Swift Executables
 ===========================
@@ -459,6 +593,13 @@ function in the current frame::
     Summary: CollectionType3`ext.CollectionType3.CollectionType3.MutableCollectionType2<A where A: CollectionType3.MutableCollectionType2>.(subscript.materializeForSet : (Swift.Range<A.Index>) -> Swift.MutableSlice<A>).(closure #1)
     Module: file = "/Volumes/Files/work/solon/build/build-swift/validation-test-macosx-x86_64/stdlib/Output/CollectionType.swift.gyb.tmp/CollectionType3", arch = "x86_64"
     Symbol: id = {0x0000008c}, range = [0x0000000100004db0-0x00000001000056f0), name="ext.CollectionType3.CollectionType3.MutableCollectionType2<A where A: CollectionType3.MutableCollectionType2>.(subscript.materializeForSet : (Swift.Range<A.Index>) -> Swift.MutableSlice<A>).(closure #1)", mangled="_TFFeRq_15CollectionType322MutableCollectionType2_S_S0_m9subscriptFGVs5Rangeqq_s16MutableIndexable5Index_GVs12MutableSliceq__U_FTBpRBBRQPS0_MS4__T_"
+
+Manually symbolication using LLDB
+---------------------------------
+
+One can perform manual symbolication of a crash log or an executable using LLDB
+without running the actual executable. For a detailed guide on how to do this,
+see: https://lldb.llvm.org/symbolication.html.
 
 Debugging LLDB failures
 =======================

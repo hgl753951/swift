@@ -17,8 +17,81 @@
 #ifndef SWIFT_RUNTIME_CONFIG_H
 #define SWIFT_RUNTIME_CONFIG_H
 
-// Bring in visibility attribute macros for library visibility.
-#include "llvm/Support/Compiler.h"
+#include "swift/Runtime/CMakeConfig.h"
+
+/// \macro SWIFT_RUNTIME_GNUC_PREREQ
+/// Extend the default __GNUC_PREREQ even if glibc's features.h isn't
+/// available.
+#ifndef SWIFT_RUNTIME_GNUC_PREREQ
+# if defined(__GNUC__) && defined(__GNUC_MINOR__) && defined(__GNUC_PATCHLEVEL__)
+#  define SWIFT_RUNTIME_GNUC_PREREQ(maj, min, patch) \
+    ((__GNUC__ << 20) + (__GNUC_MINOR__ << 10) + __GNUC_PATCHLEVEL__ >= \
+     ((maj) << 20) + ((min) << 10) + (patch))
+# elif defined(__GNUC__) && defined(__GNUC_MINOR__)
+#  define SWIFT_RUNTIME_GNUC_PREREQ(maj, min, patch) \
+    ((__GNUC__ << 20) + (__GNUC_MINOR__ << 10) >= ((maj) << 20) + ((min) << 10))
+# else
+#  define SWIFT_RUNTIME_GNUC_PREREQ(maj, min, patch) 0
+# endif
+#endif
+
+/// SWIFT_RUNTIME_LIBRARY_VISIBILITY - If a class marked with this attribute is
+/// linked into a shared library, then the class should be private to the
+/// library and not accessible from outside it.  Can also be used to mark
+/// variables and functions, making them private to any shared library they are
+/// linked into.
+/// On PE/COFF targets, library visibility is the default, so this isn't needed.
+#if (__has_attribute(visibility) || SWIFT_RUNTIME_GNUC_PREREQ(4, 0, 0)) &&    \
+    !defined(__MINGW32__) && !defined(__CYGWIN__) && !defined(_WIN32)
+#define SWIFT_RUNTIME_LIBRARY_VISIBILITY __attribute__ ((visibility("hidden")))
+#else
+#define SWIFT_RUNTIME_LIBRARY_VISIBILITY
+#endif
+
+/// Attributes.
+/// SWIFT_RUNTIME_ATTRIBUTE_NOINLINE - On compilers where we have a directive to do so,
+/// mark a method "not for inlining".
+#if __has_attribute(noinline) || SWIFT_RUNTIME_GNUC_PREREQ(3, 4, 0)
+#define SWIFT_RUNTIME_ATTRIBUTE_NOINLINE __attribute__((noinline))
+#elif defined(_MSC_VER)
+#define SWIFT_RUNTIME_ATTRIBUTE_NOINLINE __declspec(noinline)
+#else
+#define SWIFT_RUNTIME_ATTRIBUTE_NOINLINE
+#endif
+
+/// SWIFT_RUNTIME_ATTRIBUTE_ALWAYS_INLINE - On compilers where we have a directive to do
+/// so, mark a method "always inline" because it is performance sensitive. GCC
+/// 3.4 supported this but is buggy in various cases and produces unimplemented
+/// errors, just use it in GCC 4.0 and later.
+#if __has_attribute(always_inline) || SWIFT_RUNTIME_GNUC_PREREQ(4, 0, 0)
+#define SWIFT_RUNTIME_ATTRIBUTE_ALWAYS_INLINE __attribute__((always_inline))
+#elif defined(_MSC_VER)
+#define SWIFT_RUNTIME_ATTRIBUTE_ALWAYS_INLINE __forceinline
+#else
+#define SWIFT_RUNTIME_ATTRIBUTE_ALWAYS_INLINE
+#endif
+
+#ifdef __GNUC__
+#define SWIFT_RUNTIME_ATTRIBUTE_NORETURN __attribute__((noreturn))
+#elif defined(_MSC_VER)
+#define SWIFT_RUNTIME_ATTRIBUTE_NORETURN __declspec(noreturn)
+#else
+#define SWIFT_RUNTIME_ATTRIBUTE_NORETURN
+#endif
+
+/// SWIFT_RUNTIME_BUILTIN_TRAP - On compilers which support it, expands to an expression
+/// which causes the program to exit abnormally.
+#if __has_builtin(__builtin_trap) || SWIFT_RUNTIME_GNUC_PREREQ(4, 3, 0)
+# define SWIFT_RUNTIME_BUILTIN_TRAP __builtin_trap()
+#elif defined(_MSC_VER)
+// The __debugbreak intrinsic is supported by MSVC, does not require forward
+// declarations involving platform-specific typedefs (unlike RaiseException),
+// results in a call to vectored exception handlers, and encodes to a short
+// instruction that still causes the trapping behavior we want.
+# define SWIFT_RUNTIME_BUILTIN_TRAP __debugbreak()
+#else
+# define SWIFT_RUNTIME_BUILTIN_TRAP *(volatile int*)0x11 = 0
+#endif
 
 /// Does the current Swift platform support "unbridged" interoperation
 /// with Objective-C?  If so, the implementations of various types must
@@ -68,10 +141,28 @@
 /// Which bits in the class metadata are used to distinguish Swift classes
 /// from ObjC classes?
 #ifndef SWIFT_CLASS_IS_SWIFT_MASK
-# if defined(__APPLE__) && SWIFT_OBJC_INTEROP && SWIFT_DARWIN_ENABLE_STABLE_ABI_BIT
-#  define SWIFT_CLASS_IS_SWIFT_MASK 2ULL
-# else
+
+// Non-Apple platforms always use 1.
+# if !defined(__APPLE__)
 #  define SWIFT_CLASS_IS_SWIFT_MASK 1ULL
+
+// Builds for Swift-in-the-OS always use 2.
+# elif SWIFT_BNI_OS_BUILD
+#  define SWIFT_CLASS_IS_SWIFT_MASK 2ULL
+
+// Builds for Xcode always use 1.
+# elif SWIFT_BNI_XCODE_BUILD
+#  define SWIFT_CLASS_IS_SWIFT_MASK 1ULL
+
+// Other builds (such as local builds on developers' computers)
+// dynamically choose the bit at runtime based on the current OS
+// version.
+# else
+#  define SWIFT_CLASS_IS_SWIFT_MASK _swift_classIsSwiftMask
+#  define SWIFT_CLASS_IS_SWIFT_MASK_GLOBAL_VARIABLE 1
+#  define SWIFT_BUILD_HAS_BACK_DEPLOYMENT 1
+#  include "BackDeployment.h"
+
 # endif
 #endif
 
@@ -135,16 +226,95 @@
 // so changing this value is not sufficient.
 #define SWIFT_DEFAULT_LLVM_CC llvm::CallingConv::C
 
-// These are temporary macros during the +0 cc exploration to cleanly support
-// both +0 and +1 in the runtime.
-#ifndef SWIFT_RUNTIME_ENABLE_GUARANTEED_NORMAL_ARGUMENTS
-#define SWIFT_NS_RELEASES_ARGUMENT NS_RELEASES_ARGUMENT
-#define SWIFT_CC_PLUSONE_GUARD(...) do { __VA_ARGS__ ; } while (0)
-#define SWIFT_CC_PLUSZERO_GUARD(...)
+// Pointer authentication.
+#if __has_feature(ptrauth_calls)
+#define SWIFT_PTRAUTH 1
+#include <ptrauth.h>
+#define __ptrauth_swift_runtime_function_entry \
+  __ptrauth(ptrauth_key_function_pointer, 1, \
+            SpecialPointerAuthDiscriminators::RuntimeFunctionEntry)
+#define __ptrauth_swift_runtime_function_entry_with_key(__key) \
+  __ptrauth(ptrauth_key_function_pointer, 1, __key)
+#define __ptrauth_swift_runtime_function_entry_strip(__fn) \
+  ptrauth_strip(__fn, ptrauth_key_function_pointer)
+#define __ptrauth_swift_type_descriptor \
+  __ptrauth(ptrauth_key_process_independent_data, 1, \
+            SpecialPointerAuthDiscriminators::TypeDescriptor)
+#define __ptrauth_swift_dynamic_replacement_key                                \
+  __ptrauth(ptrauth_key_process_independent_data, 1,                           \
+            SpecialPointerAuthDiscriminators::DynamicReplacementKey)
+#define swift_ptrauth_sign_opaque_read_resume_function(__fn, __buffer)         \
+  ptrauth_auth_and_resign(__fn, ptrauth_key_function_pointer, 0,               \
+                          ptrauth_key_process_independent_code,                \
+                          ptrauth_blend_discriminator(__buffer,                \
+            SpecialPointerAuthDiscriminators::OpaqueReadResumeFunction))
+#define swift_ptrauth_sign_opaque_modify_resume_function(__fn, __buffer)       \
+  ptrauth_auth_and_resign(__fn, ptrauth_key_function_pointer, 0,               \
+                          ptrauth_key_process_independent_code,                \
+                          ptrauth_blend_discriminator(__buffer,                \
+            SpecialPointerAuthDiscriminators::OpaqueModifyResumeFunction))
 #else
-#define SWIFT_NS_RELEASES_ARGUMENT
-#define SWIFT_CC_PLUSONE_GUARD(...)
-#define SWIFT_CC_PLUSZERO_GUARD(...)  do { __VA_ARGS__ ; } while (0)
+#define SWIFT_PTRAUTH 0
+#define __ptrauth_swift_function_pointer(__typekey)
+#define __ptrauth_swift_class_method_pointer(__declkey)
+#define __ptrauth_swift_protocol_witness_function_pointer(__declkey)
+#define __ptrauth_swift_value_witness_function_pointer(__key)
+#define __ptrauth_swift_type_metadata_instantiation_function
+#define __ptrauth_swift_runtime_function_entry
+#define __ptrauth_swift_runtime_function_entry_with_key(__key)
+#define __ptrauth_swift_runtime_function_entry_strip(__fn) (__fn)
+#define __ptrauth_swift_heap_object_destructor
+#define __ptrauth_swift_type_descriptor
+#define __ptrauth_swift_dynamic_replacement_key
+#define swift_ptrauth_sign_opaque_read_resume_function(__fn, __buffer) (__fn)
+#define swift_ptrauth_sign_opaque_modify_resume_function(__fn, __buffer) (__fn)
+#endif
+
+#ifdef __cplusplus
+
+/// Copy an address-discriminated signed pointer from the source to the dest.
+template <class T>
+SWIFT_RUNTIME_ATTRIBUTE_ALWAYS_INLINE
+static inline void swift_ptrauth_copy(T *dest, const T *src, unsigned extra) {
+#if SWIFT_PTRAUTH
+  *dest = ptrauth_auth_and_resign(*src,
+                                  ptrauth_key_function_pointer,
+                                  ptrauth_blend_discriminator(src, extra),
+                                  ptrauth_key_function_pointer,
+                                  ptrauth_blend_discriminator(dest, extra));
+#else
+  *dest = *src;
+#endif
+}
+
+/// Initialize the destination with an address-discriminated signed pointer.
+/// This does not authenticate the source value, so be careful about how
+/// you construct it.
+template <class T>
+SWIFT_RUNTIME_ATTRIBUTE_ALWAYS_INLINE
+static inline void swift_ptrauth_init(T *dest, T value, unsigned extra) {
+  // FIXME: assert that T is not a function-pointer type?
+#if SWIFT_PTRAUTH
+  *dest = ptrauth_sign_unauthenticated(value,
+                                  ptrauth_key_function_pointer,
+                                  ptrauth_blend_discriminator(dest, extra));
+#else
+  *dest = value;
+#endif
+}
+
+template <typename T>
+SWIFT_RUNTIME_ATTRIBUTE_ALWAYS_INLINE
+static inline T swift_auth_data_non_address(T value, unsigned extra) {
+#if SWIFT_PTRAUTH
+  return (T)ptrauth_auth_data((void *)value,
+                               ptrauth_key_process_independent_data,
+                               extra);
+#else
+  return value;
+#endif
+}
+
 #endif
 
 #endif // SWIFT_RUNTIME_CONFIG_H

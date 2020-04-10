@@ -16,13 +16,20 @@
 
 #include "swift/AST/Pattern.h"
 #include "swift/AST/ASTContext.h"
-#include "swift/AST/Expr.h"
 #include "swift/AST/ASTWalker.h"
+#include "swift/AST/Expr.h"
 #include "swift/AST/GenericEnvironment.h"
 #include "swift/AST/TypeLoc.h"
+#include "swift/AST/TypeRepr.h"
+#include "swift/Basic/Statistic.h"
 #include "llvm/ADT/APFloat.h"
 #include "llvm/Support/raw_ostream.h"
 using namespace swift;
+
+#define PATTERN(Id, _) \
+  static_assert(IsTriviallyDestructible<Id##Pattern>::value, \
+                "Patterns are BumpPtrAllocated; the d'tor is never called");
+#include "swift/AST/PatternNodes.def"
 
 /// Diagnostic printing of PatternKinds.
 llvm::raw_ostream &swift::operator<<(llvm::raw_ostream &OS, PatternKind kind) {
@@ -188,7 +195,7 @@ namespace {
 } // end anonymous namespace
 
 
-/// \brief apply the specified function to all variables referenced in this
+/// apply the specified function to all variables referenced in this
 /// pattern.
 void Pattern::forEachVariable(llvm::function_ref<void(VarDecl *)> fn) const {
   switch (getKind()) {
@@ -233,7 +240,7 @@ void Pattern::forEachVariable(llvm::function_ref<void(VarDecl *)> fn) const {
   }
 }
 
-/// \brief apply the specified function to all pattern nodes recursively in
+/// apply the specified function to all pattern nodes recursively in
 /// this pattern.  This is a pre-order traversal.
 void Pattern::forEachNode(llvm::function_ref<void(Pattern*)> f) {
   f(this);
@@ -399,6 +406,30 @@ SourceRange TuplePattern::getSourceRange() const {
            Fields.back().getPattern()->getEndLoc() };
 }
 
+TypedPattern::TypedPattern(Pattern *pattern, TypeRepr *tr,
+                           Optional<bool> implicit)
+  : Pattern(PatternKind::Typed), SubPattern(pattern), PatTypeRepr(tr) {
+  if (implicit ? *implicit : tr && !tr->getSourceRange().isValid())
+    setImplicit();
+  Bits.TypedPattern.IsPropagatedType = false;
+}
+
+TypeLoc TypedPattern::getTypeLoc() const {
+  TypeLoc loc = TypeLoc(PatTypeRepr);
+
+  if (hasType())
+    loc.setType(getType());
+
+  return loc;
+}
+
+SourceLoc TypedPattern::getLoc() const {
+  if (SubPattern->isImplicit() && PatTypeRepr)
+    return PatTypeRepr->getSourceRange().Start;
+
+  return SubPattern->getLoc();
+}
+
 SourceRange TypedPattern::getSourceRange() const {
   if (isImplicit() || isPropagatedType()) {
     // If a TypedPattern is implicit, then its type is definitely implicit, so
@@ -407,10 +438,14 @@ SourceRange TypedPattern::getSourceRange() const {
     return SubPattern->getSourceRange();
   }
 
-  if (SubPattern->isImplicit())
-    return PatType.getSourceRange();
+  if (!PatTypeRepr)
+    return SourceRange();
 
-  return { SubPattern->getSourceRange().Start, PatType.getSourceRange().End };
+  if (SubPattern->isImplicit())
+    return PatTypeRepr->getSourceRange();
+
+  return { SubPattern->getSourceRange().Start,
+           PatTypeRepr->getSourceRange().End };
 }
 
 /// Construct an ExprPattern.
@@ -431,4 +466,65 @@ SourceLoc ExprPattern::getLoc() const {
 SourceRange ExprPattern::getSourceRange() const {
   return getSubExpr()->getSourceRange();
 }
-  
+
+// See swift/Basic/Statistic.h for declaration: this enables tracing Patterns, is
+// defined here to avoid too much layering violation / circular linkage
+// dependency.
+
+struct PatternTraceFormatter : public UnifiedStatsReporter::TraceFormatter {
+  void traceName(const void *Entity, raw_ostream &OS) const {
+    if (!Entity)
+      return;
+    const Pattern *P = static_cast<const Pattern *>(Entity);
+    if (const NamedPattern *NP = dyn_cast<NamedPattern>(P)) {
+      OS << NP->getBoundName();
+    }
+  }
+  void traceLoc(const void *Entity, SourceManager *SM,
+                clang::SourceManager *CSM, raw_ostream &OS) const {
+    if (!Entity)
+      return;
+    const Pattern *P = static_cast<const Pattern *>(Entity);
+    P->getSourceRange().print(OS, *SM, false);
+  }
+};
+
+static PatternTraceFormatter TF;
+
+template<>
+const UnifiedStatsReporter::TraceFormatter*
+FrontendStatsTracer::getTraceFormatter<const Pattern *>() {
+  return &TF;
+}
+
+
+ContextualPattern ContextualPattern::forPatternBindingDecl(
+    PatternBindingDecl *pbd, unsigned index) {
+  return ContextualPattern(
+      pbd->getPattern(index), /*isTopLevel=*/true, pbd, index);
+}
+
+DeclContext *ContextualPattern::getDeclContext() const {
+  if (auto pbd = getPatternBindingDecl())
+    return pbd->getDeclContext();
+
+  return declOrContext.get<DeclContext *>();
+}
+
+PatternBindingDecl *ContextualPattern::getPatternBindingDecl() const {
+  return declOrContext.dyn_cast<PatternBindingDecl *>();
+}
+
+bool ContextualPattern::allowsInference() const {
+  if (auto pbd = getPatternBindingDecl()) {
+    return pbd->isInitialized(index) ||
+        pbd->isDefaultInitializableViaPropertyWrapper(index);
+  }
+
+  return true;
+}
+
+void swift::simple_display(llvm::raw_ostream &out,
+                           const ContextualPattern &pattern) {
+  out << "(pattern @ " << pattern.getPattern() << ")";
+}

@@ -31,22 +31,18 @@ void FixitApplyDiagnosticConsumer::printResult(llvm::raw_ostream &OS) const {
   RewriteBuf.write(OS);
 }
 
-void FixitApplyDiagnosticConsumer::
-handleDiagnostic(SourceManager &SM, SourceLoc Loc,
-                 DiagnosticKind Kind,
-                 StringRef FormatString,
-                 ArrayRef<DiagnosticArgument> FormatArgs,
-                 const DiagnosticInfo &Info) {
-  if (Loc.isInvalid()) {
+void FixitApplyDiagnosticConsumer::handleDiagnostic(
+    SourceManager &SM, const DiagnosticInfo &Info) {
+  if (Info.Loc.isInvalid()) {
     return;
   }
-  auto ThisBufferID = SM.findBufferContainingLoc(Loc);
+  auto ThisBufferID = SM.findBufferContainingLoc(Info.Loc);
   auto ThisBufferName = SM.getIdentifierForBuffer(ThisBufferID);
   if (ThisBufferName != BufferName) {
     return;
   }
 
-  if (!shouldTakeFixit(Kind, Info)) {
+  if (!shouldTakeFixit(Info)) {
     return;
   }
 
@@ -59,12 +55,12 @@ handleDiagnostic(SourceManager &SM, SourceLoc Loc,
 
     // Ignore meaningless Fix-its.
     if (Length == 0 && Text.size() == 0)
-      return;
+      continue;
 
     // Ignore pre-applied equivalents.
-    Replacement R { Offset, Length, Text };
+    Replacement R{Offset, Length, Text.str()};
     if (Replacements.count(R)) {
-      return;
+      continue;
     } else {
       Replacements.insert(R);
     }

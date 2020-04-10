@@ -24,8 +24,6 @@
 #include "swift/Remote/MetadataReader.h"
 #include "swift/Runtime/Unreachable.h"
 
-#include <iostream>
-
 namespace swift {
 namespace reflection {
 
@@ -150,7 +148,10 @@ public:
   }
 
   void dump() const;
-  void dump(std::ostream &OS, unsigned Indent = 0) const;
+  void dump(FILE *file, unsigned Indent = 0) const;
+
+  /// Build a demangle tree from this TypeRef.
+  Demangle::NodePointer getDemangling(Demangle::Demangler &Dem) const;
 
   bool isConcrete() const;
   bool isConcreteAfterSubstitutions(const GenericArgumentMap &Subs) const;
@@ -158,7 +159,7 @@ public:
   const TypeRef *
   subst(TypeRefBuilder &Builder, const GenericArgumentMap &Subs) const;
 
-  GenericArgumentMap getSubstMap() const;
+  llvm::Optional<GenericArgumentMap> getSubstMap() const;
 
   virtual ~TypeRef() = default;
 
@@ -386,11 +387,11 @@ public:
 };
 
 class ProtocolCompositionTypeRef final : public TypeRef {
-  std::vector<const NominalTypeRef *> Protocols;
+  std::vector<const TypeRef *> Protocols;
   const TypeRef *Superclass;
   bool HasExplicitAnyObject;
 
-  static TypeRefID Profile(std::vector<const NominalTypeRef *> Protocols,
+  static TypeRefID Profile(std::vector<const TypeRef *> Protocols,
                            const TypeRef *Superclass,
                            bool HasExplicitAnyObject) {
     TypeRefID ID;
@@ -403,7 +404,7 @@ class ProtocolCompositionTypeRef final : public TypeRef {
   }
 
 public:
-  ProtocolCompositionTypeRef(std::vector<const NominalTypeRef *> Protocols,
+  ProtocolCompositionTypeRef(std::vector<const TypeRef *> Protocols,
                              const TypeRef *Superclass,
                              bool HasExplicitAnyObject)
     : TypeRef(TypeRefKind::ProtocolComposition),
@@ -412,13 +413,14 @@ public:
 
   template <typename Allocator>
   static const ProtocolCompositionTypeRef *
-  create(Allocator &A, std::vector<const NominalTypeRef *> Protocols,
+  create(Allocator &A, std::vector<const TypeRef *> Protocols,
          const TypeRef *Superclass, bool HasExplicitAnyObject) {
     FIND_OR_CREATE_TYPEREF(A, ProtocolCompositionTypeRef, Protocols,
                            Superclass, HasExplicitAnyObject);
   }
 
-  const std::vector<const NominalTypeRef *> &getProtocols() const {
+  // These are either NominalTypeRef or ObjCProtocolTypeRef.
+  const std::vector<const TypeRef *> &getProtocols() const {
     return Protocols;
   }
 
@@ -633,6 +635,36 @@ public:
   }
 };
 
+class ObjCProtocolTypeRef final : public TypeRef {
+  std::string Name;
+  static const ObjCProtocolTypeRef *UnnamedSingleton;
+
+  static TypeRefID Profile(const std::string &Name) {
+    TypeRefID ID;
+    ID.addString(Name);
+    return ID;
+  }
+public:
+  ObjCProtocolTypeRef(const std::string &Name)
+    : TypeRef(TypeRefKind::ObjCProtocol), Name(Name) {}
+
+  static const ObjCProtocolTypeRef *getUnnamed();
+
+  template <typename Allocator>
+  static const ObjCProtocolTypeRef *create(Allocator &A,
+                                           const std::string &Name) {
+    FIND_OR_CREATE_TYPEREF(A, ObjCProtocolTypeRef, Name);
+  }
+
+  const std::string &getName() const {
+    return Name;
+  }
+
+  static bool classof(const TypeRef *TR) {
+    return TR->getKind() == TypeRefKind::ObjCProtocol;
+  }
+};
+
 class OpaqueTypeRef final : public TypeRef {
   static const OpaqueTypeRef *Singleton;
 
@@ -667,63 +699,33 @@ public:
   }
 
   static bool classof(const TypeRef *TR) {
-    auto Kind = TR->getKind();
-    return (Kind == TypeRefKind::UnownedStorage ||
-            Kind == TypeRefKind::WeakStorage ||
-            Kind == TypeRefKind::UnmanagedStorage);
+    switch (TR->getKind()) {
+#define REF_STORAGE(Name, ...) \
+    case TypeRefKind::Name##Storage:
+#include "swift/AST/ReferenceStorage.def"
+      return true;
+    default:
+      return false;
+    }
   }
 };
 
-class UnownedStorageTypeRef final : public ReferenceStorageTypeRef {
-  using ReferenceStorageTypeRef::Profile;
-public:
-  UnownedStorageTypeRef(const TypeRef *Type)
-    : ReferenceStorageTypeRef(TypeRefKind::UnownedStorage, Type) {}
-
-  template <typename Allocator>
-  static const UnownedStorageTypeRef *create(Allocator &A,
-                                             const TypeRef *Type) {
-    FIND_OR_CREATE_TYPEREF(A, UnownedStorageTypeRef, Type);
-  }
-
-  static bool classof(const TypeRef *TR) {
-    return TR->getKind() == TypeRefKind::UnownedStorage;
-  }
-};
-
-class WeakStorageTypeRef final : public ReferenceStorageTypeRef {
-  using ReferenceStorageTypeRef::Profile;
-public:
-  WeakStorageTypeRef(const TypeRef *Type)
-    : ReferenceStorageTypeRef(TypeRefKind::WeakStorage, Type) {}
-
-  template <typename Allocator>
-  static const WeakStorageTypeRef *create(Allocator &A,
-                                          const TypeRef *Type) {
-    FIND_OR_CREATE_TYPEREF(A, WeakStorageTypeRef, Type);
-  }
-
-  static bool classof(const TypeRef *TR) {
-    return TR->getKind() == TypeRefKind::WeakStorage;
-  }
-};
-
-class UnmanagedStorageTypeRef final : public ReferenceStorageTypeRef {
-  using ReferenceStorageTypeRef::Profile;
-public:
-  UnmanagedStorageTypeRef(const TypeRef *Type)
-    : ReferenceStorageTypeRef(TypeRefKind::UnmanagedStorage, Type) {}
-
-  template <typename Allocator>
-  static const UnmanagedStorageTypeRef *create(Allocator &A,
-                                               const TypeRef *Type) {
-    FIND_OR_CREATE_TYPEREF(A, UnmanagedStorageTypeRef, Type);
-  }
-
-  static bool classof(const TypeRef *TR) {
-    return TR->getKind() == TypeRefKind::UnmanagedStorage;
-  }
-};
+#define REF_STORAGE(Name, ...) \
+  class Name##StorageTypeRef final : public ReferenceStorageTypeRef { \
+    using ReferenceStorageTypeRef::Profile; \
+  public: \
+    Name##StorageTypeRef(const TypeRef *Type) \
+      : ReferenceStorageTypeRef(TypeRefKind::Name##Storage, Type) {} \
+    template <typename Allocator> \
+    static const Name##StorageTypeRef *create(Allocator &A, \
+                                              const TypeRef *Type) { \
+      FIND_OR_CREATE_TYPEREF(A, Name##StorageTypeRef, Type); \
+    } \
+    static bool classof(const TypeRef *TR) { \
+      return TR->getKind() == TypeRefKind::Name##Storage; \
+    } \
+  };
+#include "swift/AST/ReferenceStorage.def"
 
 class SILBoxTypeRef final : public TypeRef {
   const TypeRef *BoxedType;

@@ -17,6 +17,7 @@
 #include "swift/IDE/CodeCompletion.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/Optional.h"
+#include "llvm/ADT/StringMap.h"
 
 namespace SourceKit {
 namespace CodeCompletion {
@@ -135,7 +136,8 @@ class CompletionBuilder {
 public:
   static void getFilterName(CodeCompletionString *str, raw_ostream &OS);
   static void getDescription(SwiftResult *result, raw_ostream &OS,
-                             bool leadingPunctuation);
+                             bool leadingPunctuation,
+                             bool annotatedDecription = false);
 
 public:
   CompletionBuilder(CompletionSink &sink, SwiftResult &base);

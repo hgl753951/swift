@@ -88,6 +88,30 @@ var d1 = StringDictionary<Int>()
 var d2: Dictionary<String, Int> = d1 // okay: d1 and d2 have the same type, Dictionary<String, Int>
 ```
 
+### Generic associatedtypes
+
+Associatedtypes could be allowed to carry generic parameters. 
+
+```Swift
+    protocol Wrapper {
+      associatedtype Wrapped<T>
+      
+      static func wrap<T>(_ t: T) -> Wrapped<T>
+    }
+```
+
+Generic associatedtypes would support all constraints supported by the language including where clauses.  As with non-generic associatedtypes conforming types would be required to provide a nested type or typealias matching the name of the associatedtype.  However, in this case the nested type or typealias would be generic.  
+
+```Swift
+    enum OptionalWrapper {
+      typealias Wrapped<T> = Optional<T>
+      
+      static func wrap<T>(_ t: T) -> Optional<T>
+    }
+```
+
+Note: generic associatedtypes address many use cases also addressed by higher-kinded types but with lower implementation complexity.
+
 ### Generic subscripts
 
 *This feature has been accepted in [SE-0148](https://github.com/apple/swift-evolution/blob/master/proposals/0148-generic-subscripts.md), was tracked by [SR-115](https://bugs.swift.org/browse/SR-115) and was released with Swift 4.*
@@ -249,6 +273,21 @@ typealias AnyObject = protocol<class>
 
 See the "Existentials" section, particularly "Generalized existentials", for more information.
 
+### Generalized supertype constraints
+
+Currently, supertype constraints may only be specified using a concrete class or protocol type.  This prevents us from abstracting over the supertype.
+
+```Swift
+protocol P {
+  associatedtype Base
+  associatedtype Derived: Base
+}
+```
+
+In the above example `Base` may be any type.  `Derived` may be the same as `Base` or may be _any_ subtype of `Base`.  All subtype relationships supported by Swift should be supported in this context including (but not limited to) classes and subclasses, existentials and conforming concrete types or refining existentials, `T?` and  `T`, `((Base) -> Void)` and `((Derived) -> Void)`, etc.
+
+Generalized supertype constraints would be accepted in all syntactic locations where generic constraints are accepted.
+
 ### Allowing subclasses to override requirements satisfied by defaults (*)
 
 When a superclass conforms to a protocol and has one of the protocol's requirements satisfied by a member of a protocol extension, that member currently cannot be overridden by a subclass. For example:
@@ -283,7 +322,7 @@ Unlike the minor extensions, major extensions to the generics model provide more
 
 ### Conditional conformances (*)
 
-*This feature has been accepted in [SE-0143](https://github.com/apple/swift-evolution/blob/master/proposals/0143-conditional-conformances.md) and is under development.*
+*This feature has been accepted in [SE-0143](https://github.com/apple/swift-evolution/blob/master/proposals/0143-conditional-conformances.md) and is implemented in Swift 4.2.*
 
 Conditional conformances express the notion that a generic type will conform to a particular protocol only under certain circumstances. For example, `Array` is `Equatable` only when its elements are `Equatable`:
 
@@ -346,7 +385,7 @@ public struct ZipIterator<... Iterators : IteratorProtocol> : Iterator {  // zer
   public mutating func next() -> Element? {
     if reachedEnd { return nil }
 
-    guard let values = (iterators.next()...) {   // call "next" on each of the iterators, put the results into a tuple named "values"
+    guard let values = (iterators.next()...) else {   // call "next" on each of the iterators, put the results into a tuple named "values"
       reachedEnd = true
       return nil
     }
@@ -757,9 +796,9 @@ if e1 == e2 { ... } // error: e1 and e2 don't necessarily have the same dynamic 
 One explicit way to allow such operations in a type-safe manner is to introduce an "open existential" operation of some sort, which extracts and gives a name to the dynamic type stored inside an existential. For example:
 
 ```Swift
-if let storedInE1 = e1 openas T {     // T is a the type of storedInE1, a copy of the value stored in e1
-  if let storedInE2 = e2 as? T {      // is e2 also a T?
-    if storedInE1 == storedInE2 { ... } // okay: storedInT1 and storedInE2 are both of type T, which we know is Equatable
+if let storedInE1 = e1 openas T { // T is the type of storedInE1, a copy of the value stored in e1
+  if let storedInE2 = e2 as? T {  // Does e2 have type T? If so, copy its value to storedInE2
+    if storedInE1 == storedInE2 { ... } // Okay: storedInT1 and storedInE2 are both of type T, which we know is Equatable
   }
 }
 ```

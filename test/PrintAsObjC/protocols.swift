@@ -3,13 +3,13 @@
 // RUN: %empty-directory(%t)
 
 // FIXME: BEGIN -enable-source-import hackaround
-// RUN:  %target-swift-frontend(mock-sdk: -sdk %S/../Inputs/clang-importer-sdk -I %t) -emit-module -o %t  %S/../Inputs/clang-importer-sdk/swift-modules/ObjectiveC.swift -swift-version 3
-// RUN:  %target-swift-frontend(mock-sdk: -sdk %S/../Inputs/clang-importer-sdk -I %t) -emit-module -o %t  %S/../Inputs/clang-importer-sdk/swift-modules/CoreGraphics.swift -swift-version 3
-// RUN:  %target-swift-frontend(mock-sdk: -sdk %S/../Inputs/clang-importer-sdk -I %t) -emit-module -o %t  %S/../Inputs/clang-importer-sdk/swift-modules/Foundation.swift -swift-version 3
+// RUN:  %target-swift-frontend(mock-sdk: -sdk %S/../Inputs/clang-importer-sdk -I %t) -emit-module -o %t  %S/../Inputs/clang-importer-sdk/swift-modules/ObjectiveC.swift -disable-objc-attr-requires-foundation-module
+// RUN:  %target-swift-frontend(mock-sdk: -sdk %S/../Inputs/clang-importer-sdk -I %t) -emit-module -o %t  %S/../Inputs/clang-importer-sdk/swift-modules/CoreGraphics.swift
+// RUN:  %target-swift-frontend(mock-sdk: -sdk %S/../Inputs/clang-importer-sdk -I %t) -emit-module -o %t  %S/../Inputs/clang-importer-sdk/swift-modules/Foundation.swift
 // FIXME: END -enable-source-import hackaround
 
-// RUN: %target-swift-frontend(mock-sdk: %clang-importer-sdk-nosource) -I %t -emit-module -o %t %s -disable-objc-attr-requires-foundation-module -swift-version 3
-// RUN: %target-swift-frontend(mock-sdk: %clang-importer-sdk-nosource) -I %t -parse-as-library %t/protocols.swiftmodule -typecheck -emit-objc-header-path %t/protocols.h -import-objc-header %S/../Inputs/empty.h -disable-objc-attr-requires-foundation-module -swift-version 3
+// RUN: %target-swift-frontend(mock-sdk: %clang-importer-sdk-nosource) -I %t -emit-module -o %t %s -disable-objc-attr-requires-foundation-module
+// RUN: %target-swift-frontend(mock-sdk: %clang-importer-sdk-nosource) -I %t -parse-as-library %t/protocols.swiftmodule -typecheck -emit-objc-header-path %t/protocols.h -import-objc-header %S/../Inputs/empty.h -disable-objc-attr-requires-foundation-module
 // RUN: %FileCheck %s < %t/protocols.h
 // RUN: %FileCheck --check-prefix=NEGATIVE %s < %t/protocols.h
 // RUN: %check-in-clang %t/protocols.h
@@ -129,12 +129,12 @@ extension NSString : A, ZZZ {}
 // CHECK-LABEL: @interface PrivateProtoAdopter{{$}}
 // CHECK-NEXT: init
 // CHECK-NEXT: @end
-@objc class PrivateProtoAdopter : PrivateProto {}
+@objc @objcMembers class PrivateProtoAdopter : PrivateProto {}
 
 // CHECK-LABEL: @interface PrivateProtoAdopter2 <A>
 // CHECK-NEXT: init
 // CHECK-NEXT: @end
-@objc class PrivateProtoAdopter2 : PrivateProto, A {}
+@objc @objcMembers class PrivateProtoAdopter2 : PrivateProto, A {}
 
 // CHECK-LABEL: @protocol Properties
 // CHECK-NEXT: @property (nonatomic, readonly) NSInteger a;
@@ -165,7 +165,7 @@ extension NSString : A, ZZZ {}
   @objc func references(someClassAndZZZ: ReferencesSomeClass2 & ZZZ)
 }
 
-@objc class ReferencesSomeClass2 {}
+@objc @objcMembers class ReferencesSomeClass2 {}
 
 
 // CHECK-LABEL: @protocol ReversedOrder2{{$}}
@@ -191,7 +191,7 @@ extension NSString : A, ZZZ {}
 @objc class Subclass : RootClass1, ZZZ {}
 
 // CHECK-LABEL: @protocol UnownedProperty
-// CHECK-NEXT: @property (nonatomic, assign) id _Nonnull unownedProp;
+// CHECK-NEXT: @property (nonatomic, unsafe_unretained) id _Nonnull unownedProp;
 @objc protocol UnownedProperty {
   unowned var unownedProp: AnyObject { get set }
 }
